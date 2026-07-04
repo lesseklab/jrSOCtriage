@@ -1,0 +1,38 @@
+[Unit]
+Description=jrSOCtriage Web Configuration Interface
+After=network-online.target
+Wants=network-online.target
+
+# ----------------------------------------------------------------------------
+# IMPORTANT: Edit the two paths below before installing this unit.
+#
+#   WorkingDirectory: absolute path to your jrSOCtriage install directory
+#   ExecStart:        absolute path to your venv's python3 + interface.py
+#
+# Default values below assume install at /mnt/appdata/jrsoctriage. Change
+# both lines to match your actual install location.
+#
+# The interface binds to 127.0.0.1:9090 only. Use an SSH tunnel or a
+# reverse proxy with TLS if you need remote access.
+#
+# First-run note: when no auth file exists, interface.py drops into an
+# interactive terminal flow to create the first admin user (prompts for
+# username, password, scans QR code). This will NOT work under systemd
+# because systemd has no terminal. Run interface.py manually ONCE first
+# to complete first-run setup, then start the systemd unit. Subsequent
+# users can be added with `interface.py --add-user`.
+# ----------------------------------------------------------------------------
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/appdata/jrsoctriage
+ExecStart=/mnt/appdata/jrsoctriage/venv/bin/python3 /mnt/appdata/jrsoctriage/interface.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,551 @@
+jrSOCtriage - config.json Reference
+====================================
+
+config.json controls all pipeline and interface behavior. The web interface
+is the recommended way to edit this file — every documented field below is
+exposed through the interface with helper text and validation. Hand-editing
+config.json directly is supported but bypasses the interface's defaults
+merging.
+
+After most config changes, the pipeline service must be restarted to pick
+up the changes. Hosts.json and rules.json are read dynamically and do not
+require restart. See running_instructions.txt for the full restart-required
+matrix.
+
+Replace REPLACE_ME values before running.
+
+============================================================
+DEPLOYMENT
+============================================================
+
+Deployment identity. Both fields are optional and stamped onto every
+shipped GELF record (as jrsoc_org and jrsoc_security_domain) so that
+multiple organizations or security domains sharing one Graylog instance
+can filter and search their own alerts. Leave blank for a single-org
+lab; an unset field ships as "N/A".
+
+deployment.org
+  Name of the organization being monitored. Example: acme-corp
+
+deployment.security_domain
+  The part of the organization being monitored (e.g. a site, division,
+  or network segment). Example: production, or hq-clients
+
+============================================================
+SOURCES
+============================================================
+
+sources.wazuh
+  alerts_file
+    Path to Wazuh alerts.json. The primary alert source.
+    For Docker deployments, mount the log directory and point here.
+    The pipeline tracks its read position and handles log rotation.
+    Note: Suricata alerts arrive via Wazuh manager forwarding. There is no
+    direct eve.json reader.
+
+sources.zeek
+  enabled
+    Set true if Zeek is running on a SPAN/mirror port. Provides network
+    flow context (conn, dns, ntlm) in LLM prompts. Pipeline still works
+    without Zeek — alerts just lack flow context.
+  current_log_dir
+    Path to Zeek's current log directory (typically /opt/zeek/logs/current).
+    The pipeline reads live and recently-rotated logs from here.
+  archive_log_dir
+    Parent directory containing Zeek's dated subdirectories
+    (typically /opt/zeek/logs). Optional — defaults to the parent of
+    current_log_dir if blank.
+
+sources.ntopng
+  enabled
+    Active flow enrichment via ntopng REST API. Provides L7 application
+    protocol detection (e.g., TLS.Google, UDP/Syslog, TCP/TLS.Azure)
+    alongside host scores and alerted flow counts. These are CURRENT
+    flows only — not historical. Most useful for real-time or
+    near-real-time alerts where flows are still active.
+  endpoint
+    ntopng web interface URL. Example: http://YOUR_NTOPNG_HOST:3000
+  ifid
+    Interface ID to query. Check ntopng UI under Interfaces to find
+    the correct ID for your capture interface. Typically 1 or 2.
+  auth.username, auth.password
+    ntopng admin credentials. Uses HTTP basic auth.
+  verify_ssl
+    true for valid TLS certs; false for self-signed or HTTP.
+  skip_networks
+    List of CIDR ranges where ntopng lookups should be auto-skipped.
+    Reduces 404 noise from networks ntopng has no visibility into
+    (Docker bridges, isolated test segments). Loopback (127/8, ::1)
+    and link-local (169.254/16, fe80::/10) are always skipped
+    automatically. Example: ["172.17.0.0/16", "172.18.0.0/16"]
+    Default: empty list.
+
+sources.graylog
+  enabled
+    Set true if Graylog is aggregating logs from your hosts.
+    Provides correlated log context in LLM prompts. Pipeline still
+    works without Graylog — alerts just lack host log context.
+  endpoint
+    Graylog API endpoint (not the GELF input port).
+    Example: http://YOUR_GRAYLOG_HOST:9000
+  auth.username, auth.password
+    API user credentials. Use a dedicated read-only API user for
+    production rather than admin.
+  verify_ssl
+    true for valid TLS certs; false for self-signed or HTTP.
+  context_window_minutes
+    How many minutes of logs to fetch around each alert timestamp.
+    0.5 = 30 seconds each side. Increase for hosts with sparse logs.
+    Higher values mean more context but slower processing and more
+    noise from unrelated events.
+    For syscheck (FIM) alerts, the pipeline automatically anchors the
+    window on syscheck.mtime_after when present and recent, since
+    Wazuh's scheduled FIM scan can detect changes minutes after they
+    actually happen.
+  max_results
+    Maximum log lines fetched per alert. 100 is a safe default.
+    Increase if chatty hosts consistently hit the cap.
+
+============================================================
+PROCESSING
+============================================================
+
+poll_interval_seconds
+  How often to check for new Wazuh alerts. 30 seconds is a good balance.
+  Lower = more responsive but more CPU. Higher = more latency.
+
+max_batch_size
+  Maximum alerts to process per poll cycle. If consistently hit, raise it.
+  Check with: grep "Batch limit" jrsoc.log | wc -l
+
+dedup_silence_seconds
+  Silence window for deduplication. Identical alert+host combinations
+  within this window are collapsed into one. Default: 240 (4 minutes),
+  which was raised from 30 after a storm test surfaced excessive LLM
+  load on rapid-fire duplicates.
+
+baseline_multiplier
+  Multiplier over hourly average before flagging above-baseline in the
+  prompt. 2.0 = flag if current hour is 2x the hourly average.
+  Informational only — affects prompt content, not routing.
+
+min_baseline_days
+  Minimum days of data before baseline anomaly flags are considered
+  reliable. Default: 3.
+
+escalation_multiplier
+  Multiplier over daily average that triggers LLM escalation regardless
+  of rule level. 4.0 = escalate if today's count exceeds 4x daily
+  average. Requires min_baseline_days of data before firing.
+
+============================================================
+FILTERING
+============================================================
+
+min_rule_level
+  Minimum Wazuh rule level (0-15) to send to the LLM. Level 6 catches
+  medium and above. Lower = more LLM calls; higher = fewer calls but
+  may miss things.
+
+frequency_escalation_enabled
+  (Shown in the interface as the toggle "Escalate frequency anomalies
+  (count > multiplier x daily baseline)" on the Config screen's Filtering
+  section.)
+  Whether a rate spike can force an alert to the LLM regardless of rule
+  level. When true (default), if an alert's count over the last 24h
+  exceeds escalation_multiplier x its daily average (and at least
+  min_baseline_days of baseline exist), it is escalated to the LLM even
+  if it is below min_rule_level. Set false to turn off rate-based
+  escalation entirely — see running_instructions.txt for when you would
+  want to. The escalation_multiplier and min_baseline_days values
+  (under processing) control the threshold; this toggle controls
+  whether the mechanism runs at all.
+
+abuse_escalation_threshold
+  AbuseIPDB score (0-100) that triggers LLM escalation regardless of
+  rule level. 50 is a reasonable threshold. Requires
+  enrichment.abuseipdb.enabled: true and a valid API key.
+
+always_include.networks
+  CIDR ranges where any alert is always sent to the LLM regardless of
+  rule level. Add DMZ networks, internet-facing segments, or any
+  high-sensitivity subnets.
+
+always_include.hosts
+  Specific canonical hostnames that always get LLM triage regardless of
+  level. Use for critical infrastructure like domain controllers.
+
+escalate_first_seen_rule
+  If true, any rule+host combination that has never fired in the
+  lookback window always gets one LLM escalation regardless of rule
+  level or rules.json escalate_if conditions. Ensures novel activity
+  always gets reviewed at least once. Recommended: true.
+
+first_seen_lookback_days
+  How many days of history to check for first-seen escalation.
+  Default: 14. Requires min_baseline_days of data to be meaningful.
+
+============================================================
+ENRICHMENT
+============================================================
+
+enrichment.geo_ip
+  enabled
+    Uses ip-api.com (free, no API key, rate limited).
+    Provides country, city, ASN, and org for external IPs.
+  skip_private
+    true means RFC1918 addresses are skipped (recommended).
+
+enrichment.whois
+  enabled
+    Basic whois lookup for external IPs. Slow — adds latency per
+    unique external IP. Results are cached within each batch run.
+
+enrichment.rdns
+  enabled
+    Reverse DNS PTR lookup.
+  skip_private
+    false means internal IPs are also looked up — useful for canonical
+    hostname resolution when hosts.json is sparse.
+
+enrichment.abuseipdb
+  enabled
+    Free API key at abuseipdb.com (up to 1000 checks/day on free tier).
+  api_key
+    Your AbuseIPDB API key.
+  score_threshold
+    Scores above this are flagged in the prompt (default 25).
+    abuse_escalation_threshold in filtering controls when scores force
+    LLM routing.
+
+============================================================
+LLM
+============================================================
+
+llm.enabled
+  Set false for enrichment-only mode. All other pipeline stages still
+  run — alerts are enriched and shipped to Graylog, but no LLM triage
+  is performed and no emails are sent.
+
+llm.strategy
+  Controls how multiple endpoints are selected:
+  "fallback"    — try endpoints in priority order. Primary takes all
+                  traffic; secondary used only on primary failure.
+  "round_robin" — interleave calls evenly across enabled endpoints.
+                  Keeps secondary endpoints warm and provides quality
+                  comparison via gl2_llm_endpoint in Graylog.
+
+llm.endpoints
+  Array of endpoint configurations. Each endpoint is independently
+  enabled/disabled, prioritized, and configured.
+
+  Endpoint fields:
+  name              Human-readable label. Appears in logs, in Graylog
+                    as gl2_llm_endpoint, and in email subject lines.
+  enabled           true/false. Set false to disable temporarily
+                    without removing config.
+  url               Full HTTP URL of the LLM server including port.
+                    Ollama default: http://HOST:11434
+                    OpenAI: https://api.openai.com/v1/chat/completions
+                    Anthropic: https://api.anthropic.com/v1/messages
+                    Gemini: https://generativelanguage.googleapis.com/...
+  type              "ollama", "openai", "anthropic", or "gemini".
+                    Different types use different request schemas.
+  model             Model identifier on the endpoint.
+                    Examples: "gemma4:26b" (ollama), "gpt-4o-mini"
+                    (openai), "claude-haiku-4-5-20251001" (anthropic),
+                    "gemini-2.5-flash" (gemini).
+  api_key           Required for cloud endpoints. Leave blank for Ollama.
+  priority          Integer. Lower number = higher priority. Used by
+                    fallback strategy and as fallback order in
+                    round_robin when an endpoint fails.
+  timeout_seconds   How long to wait for a response before failing
+                    over. 60-90 seconds is typical for gemma4:26b on
+                    an RTX 3090.
+  keep_alive        Ollama-specific. -1 keeps the model loaded in
+                    VRAM indefinitely (eliminates ~16s reload per
+                    call). 0 unloads after each call to free VRAM.
+                    Ignored for non-Ollama endpoints.
+  max_concurrent    Max simultaneous requests this endpoint will
+                    accept. Used to respect provider rate limits or
+                    keep a single GPU from being overcommitted.
+
+============================================================
+EMAIL
+============================================================
+
+email.enabled
+  Set false to disable email notifications entirely. Graylog alerts
+  are a viable alternative requiring no SMTP configuration.
+
+email.smtp_host
+  SMTP server hostname or IP. Examples:
+  Gmail: smtp.gmail.com
+  Office 365: smtp.office365.com
+
+email.smtp_port
+  587 for TLS (recommended), 465 for SSL, 25 for unauthenticated relay.
+
+email.use_tls
+  true for port 587 with STARTTLS.
+
+email.username
+  Full email address of the sending account.
+
+email.password
+  For Gmail, use an App Password (not your account password). Enable
+  2FA on the account, then generate at myaccount.google.com/apppasswords.
+
+email.from_address
+  Sender address for outgoing emails. Often same as username but can
+  be a different address if your SMTP server permits.
+
+email.to_address
+  Recipient for NOTIFY-grade alerts. Comma-separate for multiple
+  recipients.
+
+email.note_address
+  Recipient for NOTE-grade alerts. Set to a different address to
+  route notes to a separate inbox or ticketing system. Defaults to
+  to_address if blank.
+
+email.subject_prefix_notify
+  Email subject prefix for NOTIFY verdicts. Default: [jrSOC ALERT]
+  Use mail filters keyed on this prefix to route to your inbox.
+
+email.subject_prefix_note
+  Email subject prefix for NOTE verdicts. Default: [jrSOC NOTE]
+  Use mail filters keyed on this prefix to route to a Notes folder.
+
+email.min_confidence_to_email
+  Minimum confidence for NOTIFY verdicts to generate email.
+  MEDIUM (default) sends MEDIUM and HIGH confidence NOTIFY verdicts.
+  HIGH sends only HIGH confidence verdicts.
+
+email.min_confidence_to_note
+  Minimum confidence for NOTE verdicts to generate email.
+  LOW (default) sends all NOTE verdicts.
+  MEDIUM filters out low-confidence notes.
+
+============================================================
+OUTPUT (GELF SHIPPER)
+============================================================
+
+The pipeline ships every triaged alert to Graylog as a GELF UDP message.
+This is separate from sources.graylog (which READS context logs FROM
+Graylog). The output ships VERDICTS TO Graylog so they appear in
+dashboards, saved searches, and stream rules.
+
+For each alert that goes through LLM triage, two GELF messages are sent:
+  - one before the LLM call (alert + enrichment, no verdict yet)
+  - one after the LLM call (alert + enrichment + verdict + reasoning)
+
+The pre-LLM ship gives operators visibility into in-flight alerts even
+if the LLM crashes mid-call. Operators building Graylog dashboards
+should filter on gl2_triage_complete:true to see only completed
+verdicts and avoid double-counting. Alerts that bypass the LLM (rule
+level too low, deduplicated, etc.) ship once with gl2_triage_complete
+set appropriately.
+
+output.graylog.enabled
+  Set true to enable GELF shipping. Strongly recommended — without it,
+  SUPPRESS verdicts have no audit trail, and the only operator
+  visibility is email notifications.
+
+output.graylog.host
+  Hostname or IP of the Graylog GELF UDP input. Often the same host
+  as the API endpoint above, but a different port.
+
+output.graylog.port
+  UDP port the GELF input listens on. Graylog default is 12201.
+
+The destination must be a "GELF UDP" input in Graylog. Create one in
+System -> Inputs -> Launch new input -> "GELF UDP". This input is
+independent of the API endpoint used for sources.graylog (HTTP) — the
+GELF input is UDP.
+
+============================================================
+INTERFACE
+============================================================
+
+interface.host
+  Network interface for the web interface to bind to. Default:
+  127.0.0.1. The interface is intended to be accessed only via SSH
+  tunnel or reverse proxy with TLS. Binding to 0.0.0.0 directly is
+  not recommended — there is no native TLS, and password+TOTP auth
+  alone is not sufficient for direct internet exposure.
+
+interface.port
+  TCP port for the web interface. Default: 9090.
+
+interface.session_timeout_minutes
+  Idle timeout for authenticated sessions. After this many minutes
+  with no client activity, the session expires server-side and the
+  user must re-authenticate. Clamped to 1-1440 (1 minute to 24
+  hours). Default: 30.
+
+  Defense in depth:
+  - Server enforces the timeout on every API request.
+  - Cookies invalidate on service restart (secret_key regenerates).
+  - Browser heartbeat checks session liveness every 30 seconds via
+    a passive endpoint, redirecting to /login on expiry. Closes the
+    "stale data visible on unattended screen" gap.
+
+============================================================
+LOGGING
+============================================================
+
+logging.log_file
+  Path to the pipeline log file. Default: ./jrsoc.log
+  When running under systemd, this is in addition to the systemd
+  journal — useful for tail/grep-based debugging.
+
+logging.prompt_log_mode
+  Controls which version of the LLM prompt is shipped to Graylog in
+  the GELF prompt field of triaged alerts. Does NOT affect what is
+  sent to the LLM — if per-endpoint anonymization is enabled, the
+  LLM receives the anonymized prompt regardless of this setting.
+  Options:
+  "anonymized"   — ship the prompt AFTER anonymization substitution
+                   (default; matches what a cloud endpoint was sent).
+                   Useful for prompt review without leaking real
+                   identities into Graylog.
+  "deanonymized" — ship the prompt with real values. Easier to read
+                   during triage; use where Graylog's sensitivity
+                   matches the alert source's sensitivity.
+  "none"         — do not ship the prompt field at all (smallest
+                   GELF messages, lowest information).
+
+logging.debug_llm_payload
+  Separate audit feature: when true, the exact prompt sent to and the
+  raw response received from CLOUD endpoints are logged to the
+  pipeline log/journal at WARNING level, before de-anonymization —
+  used to verify anonymization is working as expected on cloud-bound
+  traffic. Local endpoints (ollama, llamacpp) are deliberately NOT
+  logged: they receive un-anonymized prompts, and persisting those to
+  the system log would be a data-leak risk. Produces large log
+  volume — turn off when not auditing. Default false. Toggle in the
+  interface's Logging card ("Debug LLM Payload").
+
+
+DIAGNOSTICS
+
+diagnostics.stall_watchdog_enabled
+  Master switch for the stall watchdog (default true). The watchdog is
+  a safety net: it detects the condition where workers are idle, no
+  LLM call is in flight, and alerts are pending — i.e. the pipeline
+  has stopped making progress — and acts on it. In normal operation
+  it never fires; abandoned_total has stayed at zero across all
+  production and load-test runs. Leave enabled.
+
+diagnostics.abandon_on_stall
+  What the watchdog does when it confirms a stall (default true).
+  true  — abandon the oldest pending alert (release its slot) so the
+          pipeline keeps moving; the abandonment is logged loudly and
+          counted in abandoned_total.
+  false — observe-and-log only: the watchdog reports the stall but
+          takes no action. Useful when diagnosing, or if you prefer a
+          stuck pipeline over a sacrificed alert.
+
+diagnostics.stall_threshold_s
+  How long the no-progress condition must persist before the watchdog
+  acts (default 30.0 seconds). The watchdog requires the condition on
+  every check across this window (checks_needed = threshold /
+  interval, so the defaults require 6 consecutive positive checks) —
+  transient idle moments between alerts never accumulate.
+
+diagnostics.watchdog_interval_s
+  How often the watchdog checks (default 5.0 seconds).
+
+diagnostics.log_ingest_marker / diagnostics.log_worker_pickup
+  High-cadence log markers (default false): [INGEST_START] per cycle
+  and [WORKER_PICKUP] per alert, which together make queue-wait
+  between submission and pickup visible. Verbose — enable only for
+  active troubleshooting.
+
+  Note: the pipeline's internal stage instrumentation (the
+  stage_worker_run / stage_dedup counters visible in [LAG] lines) is
+  deliberately NOT configurable — the watchdog's stall detection
+  consumes it, so it is always on. Its cost is negligible.
+
+logging.level
+  Log level for pipeline output. "info" (default) keeps the log
+  stream clean for normal operation. "debug" enables DEBUG-level
+  diagnostic output including the periodic [LAG] line that snapshots
+  queue depth, oldest-queued-alert age, last-processed-alert age,
+  cycle duration, LLM in-flight count, and rolling LLM latency.
+  Set this via the Debug subsection of the Observability card in
+  the interface, or edit the config directly. Off by default;
+  enable only for active troubleshooting — DEBUG mode increases
+  log volume substantially. Changes take effect after a service
+  restart.
+
+============================================================
+TIMEZONE
+============================================================
+
+timezone.zeek_local_tz_offset
+  UTC offset of the system running Zeek. Used to correlate Zeek log
+  filenames (which use local time) with Wazuh alert timestamps
+  (which are UTC). Auto-detected from system TZ when possible;
+  manually override when Zeek runs in a different TZ from
+  jrSOCtriage.
+  CDT = -5, CST = -6, EDT = -4, EST = -5, PDT = -7, PST = -8.
+
+timezone.zeek_local_tz_name
+  Human-readable timezone name. Used in log messages only.
+
+============================================================
+PATHS
+============================================================
+
+paths.hosts_file
+  Path to hosts.json. Optional but strongly recommended.
+
+paths.rules_file
+  Path to rules.json. Optional.
+
+paths.position_file
+  Path to the alerts.json position tracker. Created automatically.
+
+paths.db_file
+  Path to SQLite database for baseline tracking and dedup. Created
+  automatically. Back this up to preserve baseline history across
+  reinstalls. On-disk on a local drive is the recommended default
+  and handles any realistic volume with no database contention; an
+  optional tmpfs (RAM-disk) setup is available if you want to
+  reduce drive write activity or offload a heavily-shared drive —
+  see running_instructions.txt section "HOSTING jrsoc.db IN RAM."
+
+paths.zeek_archive_dir
+  Path to Zeek's archive directory. Used by maintenance.py for
+  rotation cleanup. Optional.
+
+============================================================
+PROMPT CUSTOMIZATION
+============================================================
+
+prompt_customization.sensor_context
+  List of strings added to the SENSOR CONTEXT block of every LLM
+  prompt. Use this to describe your sensor setup, known false
+  positive patterns, and any site-specific sensor behavior the LLM
+  should know about. Edit through the Config tab; changes take
+  effect on next restart.
+
+prompt_customization.network_notes
+  List of strings added to the NETWORK NOTES block in the prompt.
+  Use for network-specific context not captured in hosts.json:
+  transit links, known noisy segments, expected cross-VLAN traffic
+  patterns. Empty by default.
+
+prompt_customization.triage_guidance
+  List of strings added to the SITE-SPECIFIC TRIAGE GUIDANCE block
+  in the prompt. Use for known false positive patterns,
+  host-specific behavioral notes, and instructions to the LLM about
+  how to interpret your environment. These appear just before the
+  triage task instructions.
+
+  Note: editing the default template in interface.py does NOT
+  retroactively update an existing config.json's triage_guidance
+  array. To adopt a new guidance line on an existing deployment,
+  paste it into the Config tab's prompt customization textarea.

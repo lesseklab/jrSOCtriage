@@ -1,0 +1,1165 @@
+jrSOCtriage - Web Interface Guide
+==================================
+
+The web interface is the primary way to configure jrSOCtriage. It
+provides a tabbed view into all configuration files with safer editing,
+live validation, and built-in service control.
+
+All tabs read from and write to JSON files in the jrSOCtriage working
+directory. There is no separate database for interface settings.
+Everything you change is written to the same config files the pipeline
+reads on startup.
+
+
+============================================================
+THE CORE WORKFLOW
+============================================================
+
+Every change to any tab follows the same three-step pattern:
+
+  1. EDIT     - Make your changes in the tab.
+  2. SAVE     - Click the Save button at the bottom of the tab.
+  3. VERIFY   - Refresh the tab (browser refresh or tab switch)
+                and confirm your changes are still there.
+  4. RESTART  - Restart jrsoctriage so the pipeline picks up the
+                new configuration.
+
+If your changes are not present after refresh, the save failed.
+Check the status bar at the bottom of the tab for error messages.
+
+The pipeline reads configuration files ONCE at startup. Changes saved
+while the pipeline is running are not picked up until you restart.
+The Restart tab provides a button to do this and captures the startup
+output so you can confirm the pipeline started cleanly.
+
+
+============================================================
+ACCESSING THE INTERFACE
+============================================================
+
+The interface binds to 127.0.0.1 only - it is not accessible from the
+network directly. To access from another machine, use an SSH tunnel:
+
+  ssh -L 9090:127.0.0.1:9090 user@jrsoctriage-host
+
+Then open http://127.0.0.1:9090 in your browser on the remote machine.
+
+First access will prompt for login credentials. Users are managed
+in the USERS tab. The first user created during initial setup has
+full access.
+
+
+------------------------------------------------------------
+FILE PROTECTION
+------------------------------------------------------------
+
+Credentials you enter through the interface (LLM API keys, ntopng
+password, Graylog auth, SMTP password, AbuseIPDB key) are written
+to config.json as plaintext. The interface does not encrypt
+secrets — the config file is the source of truth, and the file
+on disk holds whatever you typed in cleartext.
+
+The interface also writes operational state files (hosts.json,
+roles.json, rules.json, anonymization aliases) that don't contain
+credentials but DO shape LLM triage decisions. An attacker who can
+modify these files could silently degrade triage quality without
+triggering errors — the worst kind of failure for a security
+tool. Lock these down too.
+
+The interface enforces mode 600 automatically going forward:
+every save through the GUI sets restrictive permissions on the
+written file. At startup, the interface scans configured state
+files and warns about any with permissive modes. Existing files
+that pre-date the protection still need a manual chmod —
+the interface does not auto-modify files it didn't write.
+
+Web-interface user passwords are different from credentials —
+those are bcrypt-hashed in interface_auth.json, not stored in
+plaintext. TOTP 2FA secrets in that file ARE sensitive (anyone
+with read access can generate valid codes), so interface_auth.json
+must also be mode 600. The save_auth function enforces this on
+every write.
+
+If your threat model requires keyring integration, hardware
+tokens, or environment-variable-based credential lookup, those
+features are not implemented in this release. The security
+model is "plaintext credentials in root-owned, mode-600 files
+on a host you trust." See running_instructions.txt → SECURITY:
+FILE PROTECTION for the complete list of files to lock down
+and the integrity-threat rationale.
+
+
+============================================================
+TABS REFERENCE
+============================================================
+
+------------------------------------------------------------
+CONFIG
+------------------------------------------------------------
+
+The main configuration tab. Edits config.json.
+
+Sections (top to bottom):
+
+  Deployment      - Deployment identity, stamped onto every shipped
+                    Graylog record as jrsoc_org and jrsoc_security_domain.
+                    Two optional fields: the organization being monitored,
+                    and the part of it (site/division/segment). Lets
+                    multiple orgs or domains on one shared Graylog filter
+                    their own alerts. Leave blank for a single-org lab.
+
+  Data Sources    - Where jrSOCtriage reads alerts, flows, and
+                    context from. Configure only what you have
+                    deployed.
+                      - Wazuh: alerts.json path (required).
+                      - Zeek: current and archive log directories
+                        (recommended). Current holds live logs; archive
+                        holds dated rollover subdirs. Leave archive
+                        blank to default to parent of current. See
+                        running_instructions.txt ZEEK LOG PATH MODEL
+                        for layout examples.
+                      - Suricata alerts arrive via Wazuh; no direct
+                        Suricata source is configured here.
+                      - Graylog: endpoint, auth, and context
+                        window for pulling logs around each alert.
+                      - Graylog Output: separate from the Graylog
+                        input above. Configures the GELF UDP
+                        destination where triaged alerts ship after
+                        verdict assignment. Enable, host, and port.
+                        Most labs use the same host as the input
+                        but a different port (default 12201).
+                      - ntopng: endpoint, interface ID (ifid),
+                        and auth for L7 active flow enrichment.
+
+  Timezone        - Local TZ offset and name. Used to convert
+                    Zeek UTC timestamps to local time when
+                    building context windows.
+
+  Processing      - How often to poll for alerts, max batch size,
+                    dedup silence window, baseline multipliers,
+                    and max workers. These control volume and
+                    timing.
+
+  Filtering       - Minimum Wazuh rule level sent to the LLM,
+                    AbuseIPDB score threshold for escalation,
+                    first-seen rule escalation, and the toggle
+                    "Escalate frequency anomalies (count > multiplier x
+                    daily baseline)" — escalate an alert whose 24h count
+                    exceeds the multiplier x its daily baseline,
+                    regardless of rule level; on by default. Turn this
+                    OFF in fleets with devices that move on and off the
+                    network (laptops, intermittent hosts): a device
+                    that's only present part of the time has a low daily
+                    average, so its ordinary activity can exceed the
+                    multiplier and trip false escalations. Controls what
+                    reaches the LLM. (See running_instructions.txt for
+                    the full when-to-disable guidance.)
+
+                    Always Include Networks - one CIDR per line.
+                    Alerts involving these networks always escalate
+                    to the LLM regardless of rule level. Useful for
+                    DMZ or high-value segments.
+
+                    Always Include Hosts - one hostname per line.
+                    Same as Always Include Networks but per-host.
+
+  Enrichment      - External data sources that add context to
+                    alerts before the LLM sees them. All safe to
+                    disable if not needed.
+                      - Host inventory lookup (uses hosts.json).
+                      - Network CIDR lookup.
+                      - Include full alert JSON in prompt.
+                      - GeoIP (ip-api.com) - free, no auth.
+                      - WHOIS - for external IPs.
+                      - Reverse DNS - for external IPs.
+                      - AbuseIPDB - reputation scoring. Requires
+                        free API key from abuseipdb.com. Score
+                        threshold here is the annotation threshold
+                        (when to highlight in the prompt);
+                        Filtering tab has the escalation threshold.
+
+                    Each enrichment has an independent enable/
+                    skip_private toggle.
+
+  LLM Endpoints   - Add, remove, enable/disable LLM endpoints.
+                    Each endpoint has a type (Ollama, Gemini, OpenAI,
+                    Anthropic, llamacpp), model string, and connection
+                    details. Round-robin or fallback strategy is
+                    selected at the bottom.
+
+                    Max LLM Workers controls concurrent calls across
+                    all endpoints. Max Concurrent is per-endpoint.
+
+  Email           - SMTP server, credentials, NOTIFY destination,
+                    optional separate NOTE destination, subject
+                    prefixes, and minimum confidence levels.
+
+  Paths           - File paths for all jrSOCtriage data files.
+                    Click Generate Paths to auto-populate based on
+                    where interface.py is running. The database runs
+                    on local disk by default and needs no special
+                    storage at any realistic volume; an optional
+                    tmpfs (RAM-disk) setup is available if you want
+                    to reduce drive wear or offload a heavily-shared
+                    drive — see running_instructions.txt section
+                    "HOSTING jrsoc.db IN RAM."
+
+  Prompt Customization - Sensor context, triage guidance, and
+                    network notes. One item per line. These are
+                    injected into every LLM prompt.
+
+  (Prompt Log Mode and Debug LLM Payload, which control how the LLM
+   prompt is recorded in Graylog, have MOVED to the ANONYMIZATION tab
+   — they are anonymization-visibility settings. See the ANONYMIZATION
+   section below, "Graylog Prompt Logging" card.)
+
+  Observability   - Pipeline-health telemetry and debug controls.
+                    The card holds a Debug subsection containing
+                    diagnostic features that are OFF by default.
+                    Enable these only for active troubleshooting;
+                    they increase log volume. Changes take effect
+                    after a service restart.
+
+                    Debug features (subsection):
+
+                      - Debug logging: master toggle for DEBUG-level
+                        output. When ON, sets logging.level = "debug"
+                        in config and the jrSOCtriage process emits
+                        DEBUG-level diagnostic lines to journalctl.
+                        The most visible one is [LAG] — a periodic
+                        snapshot of queue depth, oldest-queued-alert
+                        age, last-processed-alert age, cycle duration,
+                        LLM in-flight count, and rolling LLM latency.
+                        OFF by default; the production jrSOCtriage
+                        log stays clean.
+
+                      - Lag log interval (seconds): how often the
+                        [LAG] line is emitted when debug logging is
+                        on. 30 is recommended (fine-grained enough
+                        to catch surge behavior, coarse enough to
+                        avoid log bloat). Set to 0 to disable [LAG]
+                        emission entirely even with debug logging
+                        on. Setting this without turning debug
+                        logging on does nothing — [LAG] is a
+                        DEBUG-level line, so it stays suppressed
+                        until the master toggle is on.
+
+                    When debug logging is on, grep for [LAG]:
+                      sudo journalctl -u jrsoctriage -f | grep '\[LAG\]'
+
+                    CRITICAL caveat on [LAG]: the line is a snapshot
+                    at the moment it was built, NOT a real-time
+                    monitor. The snapshot can be stale or misleading
+                    during quiet or dedup-heavy windows — precisely
+                    the conditions where an operator most wants to
+                    read it. [LAG] is useful with that understanding;
+                    use it as a "look around for hints" tool rather
+                    than ground truth. The trustworthy "is the
+                    pipeline abandoning work?" signal is the
+                    watchdog's abandoned_total counter (visible in
+                    [WATCHDOG_HEARTBEAT] lines). [DEDUP] (with its
+                    [DEDUP_NOTE] companion) is authoritative for the
+                    just-closed window's traffic shape, and
+                    process_time_s in GELF is authoritative for
+                    end-to-end latency. See running_instructions.txt
+                    section "PIPELINE OBSERVABILITY (LAG LOGGING)"
+                    for full field-by-field interpretation.
+
+                    Note: "Debug LLM payload" (now on the
+                    ANONYMIZATION tab, in the "Graylog Prompt Logging"
+                    card) is a SEPARATE debug feature for
+                    anonymization verification — it logs full LLM
+                    prompts and raw responses for PII-scrubbing
+                    audit. Not part of this Debug subsection; it
+                    has a different purpose, audience, and log-
+                    volume profile.
+
+Save: "Save Config" button at the bottom.
+Load Defaults: Populates every field with sensible defaults (does
+               NOT save - click Save Config to commit).
+After saving, restart is required.
+
+------------------------------------------------------------
+HOSTS
+------------------------------------------------------------
+
+Host inventory. Edits hosts.json.
+
+Each host has:
+
+  Canonical name    - How the host is referred to in logs and alerts.
+  Display name      - What shows in LLM prompts.
+  OS / VLAN         - Classification for context.
+  Roles             - One or more roles for this host. Each role row is a
+                      combo box: pick an existing role from the dropdown or
+                      type a new name (a new name creates a role on save).
+                      Use "+ Add Role" for multi-role hosts (e.g. a box that
+                      is both a hypervisor and a workstation). Roles let you
+                      write context once per kind-of-host and attach it to
+                      many hosts - see the Roles tab. The role's description
+                      and notes are shown to the LLM when this host alerts.
+  Notes             - Free-text description of expected behavior, specific
+                      to THIS host. Critical field - shown to the LLM when
+                      the host is involved in an alert. Use it for anything
+                      unique to this host that a shared role wouldn't cover.
+  Anonymization alias - Fixed alias used when anonymization is
+                      enabled. Leave blank for auto-generated alias.
+
+Saving a host that references a role which doesn't exist yet creates that
+role automatically (as a blank "New" stub) and tells you to go fill it in
+on the Roles tab. Hosts and roles stay in sync - you never end up with a
+host pointing at a role that isn't defined.
+
+Save: "Save Hosts" button at the bottom.
+No restart required - hosts.json is re-read on each alert.
+
+------------------------------------------------------------
+WAZUH API - AGENT HOST IMPORT
+------------------------------------------------------------
+
+At the top of the Hosts tab is a card titled "Wazuh API for Agent
+Host names." It connects to the Wazuh management API so you can build
+your host inventory FROM your existing Wazuh agents, instead of
+typing every host block by hand. On a network with dozens or hundreds
+of agents this is the difference between an afternoon of data entry
+and a few clicks.
+
+This is separate from the Wazuh ALERT SOURCE on the Config tab (the
+alerts.json file the pipeline reads). This card is the management API
+- the same endpoint Wazuh's own dashboard uses to list agents.
+
+CARD FIELDS
+
+  API URL           - The Wazuh API endpoint, e.g.
+                      https://your-manager:55000 . This is the manager
+                      API port (default 55000), NOT the dashboard.
+  Username          - The Wazuh API user. This is NOT your dashboard
+                      login. On the standard Docker stack the API user
+                      is "wazuh-wui". (Entering your dashboard login
+                      here returns "Invalid credentials" - a common
+                      first stumble.)
+  Password          - That API user's password.
+  Custom DNS server - Optional. The resolver used to verify agent
+                      names and IPs (see "How the import verifies"
+                      below). Leave blank to use this host's default
+                      DNS. Set it when your agents resolve on a
+                      different DNS server than this box uses - common
+                      on networks with an internal/AD DNS separate
+                      from a general resolver (split-horizon DNS).
+  Verify SSL        - Leave on for a properly-signed certificate.
+                      Turn OFF for the self-signed certificate the
+                      Wazuh API ships with by default (the usual case).
+
+Both "Save Wazuh Settings" (on this card) and "Save Hosts" (at the
+bottom of the tab) save BOTH the host inventory and these Wazuh API
+settings together, so you can't accidentally save one and lose the
+other.
+
+HOW THE IMPORT VERIFIES (why it is trustworthy)
+
+The import does not blindly copy whatever Wazuh reports. A Wazuh
+agent record can be wrong - a stale IP, a name that doesn't match
+reality. So the import checks each agent's name and IP against DNS,
+which is the authoritative source for host identity. That check is
+what sorts every agent into the right place automatically, so you
+spend your attention only where a decision is actually needed.
+
+DNS PREREQUISITE. Because verification is done against DNS - and is
+anchored on the REVERSE (PTR) record for each agent's IP - the import
+and renumber features assume your hosts are registered in DNS with
+forward AND reverse records. In Active Directory, forward records are
+usually automatic (machines self-register on domain join), but reverse
+zones and PTR records are NOT automatic; an admin must create the
+reverse lookup zones and enable PTR registration. Without PTR records,
+the import may be unable to verify agents (they land in IP/name mismatch
+or get skipped by renumber). If your network lacks complete DNS, you can
+still run jrSOCtriage by creating host entries MANUALLY - just make sure
+each host's NAME matches its Wazuh agent name (the pipeline's fallback
+when DNS can't resolve), and pin the IP with the Static IP field. See
+hosts_instructions.txt for the manual approach.
+
+If you need to ADD PTR records (AD does not auto-create them - a common
+oversight): on a small network, add them by hand in DNS Manager or
+enable PTR registration in your DHCP scope; at scale, search for "PTR
+record management" utilities (most IPAM tools handle it). This is
+standard DNS administration, outside jrSOCtriage's scope.
+
+USING THE IMPORT
+
+Click "Import Agents from Wazuh." The import contacts Wazuh, verifies
+every agent against DNS, and opens a window with up to three columns
+plus a summary:
+
+  ADDABLE (green)         - New, cleanly-verified agents not yet in
+                            your inventory. Check the ones you want
+                            (all are checked by default) and click
+                            "Add Selected," or add them individually
+                            with the "+" button. This is the bulk
+                            onboarding path: review, then add the lot.
+
+  IP MISMATCH (amber)     - The agent's name checks out, but its IP
+                            disagrees with DNS. This is ambiguous: the
+                            host may be on DHCP (its address moves) or
+                            it may be a stale static entry. For each
+                            host you choose:
+                              - blank (resolved at alert time) - the
+                                safe default; no fixed IP is stored
+                                and the pipeline looks it up live.
+                                Right for anything on DHCP or that
+                                roams (e.g. a laptop on VPN).
+                              - use DNS IP - pin the address DNS
+                                reports.
+                              - use agent IP - pin the address Wazuh
+                                reports.
+                            Three "...& Add All" buttons apply one
+                            choice to the whole column at once.
+
+  NEEDS RECONFIG (red)    - The agent's NAME does not match DNS. The
+                            agent reports one name (e.g. "fedora-soc")
+                            but DNS knows that IP as something else
+                            (e.g. "fedora"). jrSOCtriage shows you both
+                            names. You have two ways to handle it:
+
+                            1. "+ Add as <dns-name>" button (quick) -
+                               adds the host to your inventory under its
+                               DNS name. This works immediately because
+                               the pipeline identifies hosts by DNS, not
+                               by the agent's reported name - so alerts
+                               from the misnamed agent still match this
+                               entry and get context. Use this to get
+                               coverage now.
+
+                            2. Re-enroll the agent under the correct
+                               name (proper fix) - makes the agent
+                               report the right name so agent and DNS
+                               agree. See "FIXING A MISNAMED AGENT
+                               (RE-ENROLLMENT)" below. Do this when you
+                               want it clean at the source.
+
+                            If the agent has no DNS record at all, only
+                            option 2 applies (there's no DNS name to add
+                            it under) - the pane says so.
+
+  Already in hosts.json   - A collapsed count at the bottom of agents
+                            already in your inventory. Click to expand
+                            the list. Nothing to do - shown so you can
+                            confirm what is already onboarded.
+
+An agent that is currently offline shows a "disconnected" marker but
+is still importable - a host that is simply powered off (a laptop
+taken home, a machine off for the day) is still a real host.
+
+NOTHING IS SAVED UNTIL YOU SAY SO. Adds and IP changes are staged in
+the window as you work - the window updates to show your choices, but
+hosts.json on disk is untouched. Finish with:
+
+  Close & Save  - Write all your staged changes to hosts.json.
+  Close         - Discard everything you staged and start over (you
+                  are asked to confirm first). Use this if you picked
+                  the wrong options on a batch and want a clean slate.
+
+This matches the rest of the interface: nothing is permanent until an
+explicit save.
+
+UPDATING AN EXISTING HOST'S IP. If a host is already in your
+inventory but appears in IP MISMATCH (its stored IP drifted), adding
+it UPDATES that host's IP to your chosen value - it does not create a
+duplicate. Only the IP changes; the host's notes, roles, tags, and
+alias are left exactly as you wrote them. Your hand-authored context
+is never overwritten by an import.
+
+GROUP-TO-ROLE PRE-FILL (optional). The toggle "Use Wazuh agent groups
+to pre-fill roles" is OFF by default. When on, a newly-added host gets
+a role pre-filled from its Wazuh agent group - but only if the agent
+is in a real group (an agent in only the "default" group gets no role,
+never a junk one). New roles created this way appear as blank "New"
+stubs on the Roles tab for you to fill in. This only affects hosts
+being ADDED; it never changes the role of a host that already exists.
+
+FIXING A MISNAMED AGENT (RE-ENROLLMENT)
+
+When an agent appears in NEEDS RECONFIG and you want to fix it properly
+(option 2 above), the agent must REPORT the correct name. This is not
+just an edit to the agent's config file - renaming in ossec.conf alone
+does NOT change anything, because the Wazuh MANAGER is what holds the
+agent's name, and it keeps the old name until the agent RE-ENROLLS.
+This is the step that is easy to miss.
+
+The full procedure (Linux agent shown; adapt paths/commands for your
+OS and Wazuh version - see Wazuh's own enrollment docs to be exact):
+
+  1. On the AGENT host, set the new name in /var/ossec/etc/ossec.conf
+     (the <agent_name> tag inside <client><enrollment>), then stop the
+     agent:
+       sudo systemctl stop wazuh-agent
+
+  2. On the MANAGER, remove the old agent registration so its old name
+     does not linger and so the agent re-enrolls fresh. Find the agent's
+     ID first, then remove it. On a Docker manager:
+       # list agents, note the ID of the misnamed one:
+       sudo docker exec <manager-container> \
+         /var/ossec/bin/agent_control -l
+       # remove it by ID:
+       sudo docker exec -it <manager-container> \
+         /var/ossec/bin/manage_agents -r <ID>
+     CAUTION: this DELETES the registration. The agent will not report
+     again until step 4 succeeds, so make sure your enrollment is set up
+     before removing.
+
+  3. On the AGENT host, clear the old keys so it enrolls fresh:
+       sudo rm -f /var/ossec/etc/client.keys
+
+  4. Start the agent; with enrollment configured it auto-registers under
+     the new name:
+       sudo systemctl start wazuh-agent
+     Watch the log to confirm it connects:
+       sudo tail -f /var/ossec/logs/ossec.log
+     Look for "Connected to the server" and "Agent is now online."
+
+  5. VERIFY on the manager that the new name is now registered (and the
+     old one is gone):
+       sudo docker exec <manager-container> \
+         /var/ossec/bin/agent_control -l
+     The agent should now show under the correct name, Active. (It will
+     usually get a NEW agent ID - that is normal.)
+
+  6. Re-run "Import Agents from Wazuh." The agent now reports the correct
+     name, so it verifies clean and moves out of NEEDS RECONFIG into the
+     already-in list.
+
+This is more involved than the "+ Add as <dns-name>" button, which is
+why that button exists: it gets you working host context immediately
+while you schedule the proper re-enrollment when convenient.
+
+RE-VERIFY IPs (RENUMBER)
+
+The "Re-verify IPs (Renumber)" button checks every host's STORED IP in
+hosts.json against what Wazuh and DNS currently agree on, and offers to
+fix any that have drifted. This is different from Import: Import asks
+"what agents does Wazuh have?"; Renumber asks "do the IPs I already
+recorded still match reality?" Use it after a network renumber, or any
+time you suspect stored IPs have gone stale.
+
+How it decides (the safety gate): a stored IP is only flagged as drifted
+when the WAZUH AGENT and DNS AGREE on a different IP. Two independent
+sources have to concur before the tool offers to change anything - DNS
+alone could be mid-update or wrong. If the agent and DNS disagree, or a
+host has no agent, the host is left alone and listed under "skipped."
+
+What you see: click the button, confirm the warning, and you get a list
+of DRIFTED hosts, each showing "stored IP -> agreed IP" with three
+choices:
+  - Update      - pin the new agreed IP (the host genuinely renumbered)
+  - Blank IP    - un-pin it entirely; resolve live from now on (the host
+    (dhcp)         is really DHCP - if it drifted, it moves, so stop
+                   pinning it and let DNS handle it forever)
+  - Leave       - no change
+
+Two bulk buttons act on the whole drifted list at once: "Use Consensus
+IP & Update All" and "Blank All Drifted." Below the list, a count of
+unchanged hosts and an expandable "skipped" list. Nothing is written
+until "Close & Save"; "Close" discards.
+
+Only the IP changes on an update or blank - your notes, roles, tags, and
+alias on each host are never touched.
+
+INCLUDE BLANK HOSTS (the checkbox next to the button). By default,
+Renumber only looks at hosts that have a PINNED IP - blank hosts are
+skipped, because a blank host trivially "differs" from DNS (it has no IP
+to compare) and is already in the safe resolve-live state, so flagging
+it would just be noise. Tick "Include blank hosts" only when you've moved
+hosts onto static or MAC-reserved addressing and now WANT to pin IPs to
+hosts that were previously blank. With the box ticked, blank hosts with
+a stable agreed IP appear in the list, offered for pinning.
+
+WORKED EXAMPLE - moving a few blank hosts to static (MAC-reserved):
+Say you set DHCP reservations (pinned to MAC) for three hosts that were
+previously blank, and you now want those three pinned in hosts.json while
+leaving all your other blank hosts blank. A clean way to do it:
+
+  1. Tick "Include blank hosts," then click Re-verify IPs (Renumber).
+     Every blank host with a stable agreed IP now appears in the list,
+     each defaulting to "Update."
+  2. Click "Blank All Drifted." This resets every row to Blank - i.e.
+     "leave blank / don't pin." Now nothing is set to be pinned; you have
+     a safe baseline where committing would change nothing.
+  3. Manually switch just the three MAC-reserved hosts to "Update." Only
+     those three will be pinned to their agreed IP.
+  4. Close & Save.
+
+This builds the change up from "pin nothing" to "pin exactly these three,"
+so there's never a moment where you might accidentally pin hosts you meant
+to leave blank. (You could instead just Update those three individually
+without the Blank-All step, but the reset-then-select approach is the
+safest when the list is long.)
+
+Why Blank All is safe to use freely: blanking a host that is actually
+static does NO harm. The pipeline resolves IPs live at alert time, so a
+blanked static host resolves to exactly the same IP it would have had if
+pinned - the pin was only ever a stored copy of what DNS already knows.
+So blank is never wrong, only sometimes redundant: a blank static host
+just does one extra DNS lookup when an alert fires (negligible). The only
+reasons to pin at all are to skip that live lookup or to record an IP that
+DNS does not have. This is why the reset-then-select procedure above is
+safe - even if "Blank All" blanks a few genuinely-static hosts, they keep
+resolving correctly, and you re-pin only the ones you specifically want.
+
+
+
+Reusable host roles. Edits roles.json. A role lets you write "what is
+normal for this kind of host" ONCE and attach it to every host that fills
+that role, instead of repeating the same notes on each host. For example,
+write a "sales_laptop" role once, then tag 200 sales laptops with it - the
+LLM gets that context on every one of them, and you maintain it in one place.
+
+Each role has:
+
+  Name              - The role identifier (e.g. vm_host, domain_controller).
+                      This is what hosts reference and what appears in the
+                      host role dropdown.
+  Description       - Short label of what the role is (e.g. "Hypervisor
+                      host"). Shown to the LLM as context. Available
+                      immediately - even a description alone gives the LLM
+                      useful context.
+  Notes             - The reusable triage context: what traffic and
+                      behavior is normal for this kind of host. This is the
+                      payload that would otherwise be repeated on every
+                      host. Optional - you can add it later, once you have
+                      seen what is normal for these hosts in your
+                      environment.
+
+A role with both Description and Notes blank is marked "New" - these are
+usually auto-created when a host references a role that doesn't exist yet.
+Filling in either field clears the "New" mark. A host can carry several
+roles; the LLM sees the description and notes of all of them when that
+host alerts.
+
+Save: "Save Roles" button at the bottom.
+No restart required - roles.json is re-read on each alert.
+
+------------------------------------------------------------
+RULES
+------------------------------------------------------------
+
+Per-rule escalation and rate limiting. Edits rules.json.
+
+Each rule entry has:
+
+  Rule ID           - Wazuh rule number.
+  Never Escalate    - Hard suppress. Alert is never sent to LLM.
+                      Use sparingly - this creates a blind spot.
+  Dedup Silence     - How long duplicate rule+host alerts are
+                      suppressed. Useful for storm rules.
+  Max Escalations   - Rate limit for this rule. Prevents flooding
+                      during storms.
+  Rate Limit Scope  - Host or global.
+  escalate_if       - Conditions that must pass for normal escalation.
+  force_escalate_if - Conditions that bypass min_rule_level.
+  Comment           - Internal tracking note. Never sent to LLM.
+  Site-Specific Note - Free-text note sent to the LLM every time
+                      this rule fires, on any host. Use this to
+                      explain why the rule is noisy and under what
+                      conditions it is expected. This is the
+                      preferred mechanism over Never Escalate.
+  Per-Host Notes    - Optional rule+host-specific notes. Use when
+                      the same rule means very different things on
+                      different hosts (e.g. rule 504 Wazuh agent
+                      disconnect is expected on a laptop but
+                      NOTIFY-worthy on a domain controller).
+                      Click "+ Add Host Note," pick a host from
+                      the dropdown, write the note. Multiple hosts
+                      per rule are supported. Matches against the
+                      alert's canonical hostname (case-insensitive).
+                      The per-host note appears in the prompt
+                      alongside the global Site-Specific Note.
+
+All rule-related notes are edited in the Rules tab. The Hosts tab
+manages host inventory only, not rule behavior.
+
+Save: "Save Rules" button at the bottom.
+Restart required.
+
+------------------------------------------------------------
+ANONYMIZATION
+------------------------------------------------------------
+
+Identity masking controls. Edits anonymization.json, users.json,
+domain.json, ip_aliases.json. Subnet aliases are managed
+automatically in subnet_aliases.json.
+
+The tab is divided into cards:
+
+  Master Switches   - Toggle anonymization of subnets, IPs, hosts,
+                      users, and domains independently. These
+                      control WHAT gets anonymized.
+
+                      SUBNETS vs IP ADDRESSES (read this):
+                      These are two different layers over an IP
+                      address, on different axes.
+
+                      - Anonymize subnets replaces your real network
+                        IDs (your topology) with fake ones. This is
+                        the network half of the address — the part an
+                        attacker needs to actually reach a host. A
+                        bare host number is inert without its real
+                        subnet, so subnet anonymization is usually
+                        ENOUGH on its own, and it is cheap. With this
+                        on and IPs off, the network is faked but the
+                        host octet is kept real (so e.g. a .1 gateway
+                        is still visible as .1, just on a fake
+                        network).
+
+                      - Anonymize IP addresses additionally randomizes
+                        the HOST portion within the fake subnet. It
+                        closes residual host-position hints (such as
+                        .1 gateways) but costs MORE CPU per alert and
+                        is largely redundant once subnets are
+                        anonymized.
+
+                      Recommended default for cloud anonymization:
+                      subnets ON, IPs OFF (most of the privacy, least
+                      cost). Turn IPs on as well only if you also want
+                      to scrub host-position hints.
+
+                      REQUIREMENT: subnet anonymization reads your
+                      declared subnets from the NETWORKS tab. You MUST
+                      populate Networks (CIDR + name + role) for it to
+                      work. An internal IP that matches no declared
+                      subnet causes the cloud call to be REFUSED (fail
+                      closed) rather than leak un-aliased topology — so
+                      if you enable subnets, make sure every internal
+                      network you use is listed in Networks. See the
+                      NETWORKS section below.
+
+  Graylog Prompt    - Controls how the LLM prompt is recorded in
+  Logging             Graylog. This is an OUTPUT/visibility setting —
+                      it does NOT change what is sent to the cloud LLM
+                      (which is always anonymized when anonymization is
+                      enabled). It has its own Save button.
+
+                      Prompt Log Mode — what to ship to the
+                      gl2_llm_prompt field:
+                        "Deanonymized" (recommended for most) - the
+                          logged prompt shows REAL hostnames/IPs/
+                          subnets, so it is readable when investigating
+                          an alert.
+                        "Anonymized" - the logged prompt shows FAKE
+                          values, matching exactly what was sent to the
+                          API. Choose this only if you must be able to
+                          prove that real identifiers were never written
+                          to your SIEM at all — e.g. a privacy/compliance
+                          audit context (HIPAA, etc.).
+                        "None" - do not ship the prompt field to
+                          Graylog at all.
+                      NOTE: this affects ONLY the gl2_llm_prompt field.
+                      The LLM response fields (summary, reasoning,
+                      verdict) and email are ALWAYS deanonymized
+                      regardless of this setting.
+
+                      Debug LLM Payload (toggle) - logs the full prompt
+                      sent and the raw response received (before deanon)
+                      to the system journal at WARNING level. This is
+                      the mode-independent way to VERIFY anonymization —
+                      it shows exactly what went to the cloud API. Cloud-
+                      only (never logs local-endpoint prompts). Produces
+                      large log volume — turn it OFF when not actively
+                      verifying. To read it:
+                        journalctl -u jrsoctriage --no-pager | \
+                          grep -A30 "Exact prompt being sent"
+
+  Users             - REAL → ALIAS mappings for usernames seen in
+                      alerts. Auto-populates as new users are seen.
+                      You can also add mappings manually:
+                        1. Click + Add User
+                        2. Enter the real username (e.g. "jsmith",
+                           "WEBSERVER$")
+                        3. Enter an alias, or leave blank for auto-
+                           generated (user-1, user-2, etc.)
+                        4. Click Save Users
+                      Click the X button on any row to remove a
+                      mapping.
+                      No restart needed; the pipeline picks up
+                      changes on the next alert.
+
+  Domains           - REAL → ALIAS mappings for domain names. Same
+                      workflow as Users.
+
+  Subnet Aliases    - READ-ONLY. Real network ID → fake network ID,
+                      used when Anonymize subnets is on. Auto-
+                      generated from the Networks config: each real
+                      subnet maps to a fake one a single prefix bit
+                      wider (a /24 -> /23, a /30 -> /29) so the fake
+                      always has room for the hosts. Stable across
+                      restarts. You don't edit this — it is shown for
+                      audit and de-anonymization reference, so you can
+                      confirm what each real subnet is being masked as.
+                      Empty until the first cloud call after subnets
+                      is enabled, then populated.
+
+  IP Aliases        - Auto-generated within-subnet IP aliases.
+                      Stable across restarts. You can override any
+                      alias manually.
+
+Anonymization only applies to cloud endpoints with anonymize=true.
+Local endpoints (Ollama, llamacpp) never receive anonymized data.
+
+This tab does NOT manage authentication users (the people who log
+into this web interface). For that, see the USERS tab below.
+
+Save: Separate save buttons per section. (Subnet Aliases has no
+save button — it is read-only.)
+No restart required.
+
+------------------------------------------------------------
+NETWORKS
+------------------------------------------------------------
+
+CIDR ranges shown as network context in every LLM prompt.
+Edits the networks section of hosts.json.
+
+Each network has:
+
+  CIDR              - e.g. 192.168.10.0/24
+  Name              - e.g. vlan10
+  Role              - e.g. clients, windows_servers, dmz_web
+
+The LLM uses this to understand network topology. Keep it current
+as your network changes.
+
+REQUIRED FOR SUBNET ANONYMIZATION: this list is also the source of
+truth for the "Anonymize subnets" switch. Subnet anonymization can
+only alias networks it knows about, so every internal subnet you
+use MUST be declared here. If Anonymize subnets is on and an alert
+contains an internal IP that is in NONE of these declared subnets,
+the cloud call is refused (fail closed) to avoid leaking un-aliased
+topology — you would see "internal IP ... match no declared subnet"
+in the log. The fix is always to add the missing subnet here. (This
+only affects internal/RFC1918 addresses; public/external IPs and
+special addresses like 0.0.0.0 are not subject to this and do not
+need to be listed.) Each declared subnet is automatically assigned
+a stable fake alias one prefix bit wider; you can view the mapping
+in the Subnet Aliases card on the ANONYMIZATION tab.
+
+Save: "Save Networks" button.
+No restart required.
+
+
+------------------------------------------------------------
+JOURNAL
+------------------------------------------------------------
+
+Live log stream from jrsoctriage.service.
+
+Controls:
+
+  Start Stream      - Toggle button. The journal does not stream
+                      until you click Start Stream. Clicking again
+                      stops the stream. Use stop to inspect the
+                      output without new lines pushing it.
+  Clear             - Empties the journal display. Does not affect
+                      the underlying systemd journal — only the
+                      on-screen buffer.
+  Filter            - Filter by keyword (e.g. "LLM", "NOTIFY",
+                      "ERROR", endpoint name). Substring match,
+                      case-insensitive.
+
+Color coding:
+
+  ERROR lines       - red
+  WARNING lines     - amber
+  INFO and other    - default text color
+
+Use this to confirm the pipeline is processing alerts, see LLM
+verdicts as they are generated, and troubleshoot issues without
+leaving the interface.
+
+No save - read-only tab.
+
+------------------------------------------------------------
+USERS (web interface logins)
+------------------------------------------------------------
+
+This is the dedicated USERS tab for managing the people who log
+into the web interface. Add and remove are GUI-based. Password
+changes are terminal-based in v1; a GUI password-change flow is
+planned for a future release.
+
+Note: This tab is for AUTHENTICATION users only. User-to-alias
+mappings used by anonymization are managed in the ANONYMIZATION
+tab, not here.
+
+Password requirements (enforced at user creation):
+  - Minimum 8 characters
+  - At least one uppercase letter
+  - At least one lowercase letter
+  - Empty, all-lowercase, all-uppercase, and all-digit passwords
+    are rejected
+
+These rules are enforced at the time of user creation. Existing
+accounts created before the rules were introduced retain their
+original passwords until rotated.
+
+Username matching is case-sensitive. "Admin" and "admin" are
+different users.
+
+First-run setup:
+  When interface.py starts and finds no auth file, it prompts
+  in the terminal for username, password, and generates a TOTP
+  secret. A QR code is printed in the terminal for scanning
+  with an authenticator app.
+
+Adding a user (GUI):
+  1. Open the Users tab in the web interface.
+  2. Click + Add User.
+  3. Enter a username and a temporary password.
+  4. Click Create User.
+  5. A QR code appears; the new user scans it with an
+     authenticator app to enroll TOTP. The temporary password
+     should be changed by the new user on their first login
+     (terminal procedure below).
+
+Adding a user (terminal alternative):
+  Run interface.py with the --add-user flag:
+
+    sudo ./venv/bin/python3 interface.py --add-user
+
+  This launches the same prompted flow as first-run setup but
+  appends to the existing auth file rather than creating a
+  new one. Functionally equivalent to GUI Add User.
+
+Removing a user (GUI):
+  In the Users tab, click Remove next to the user you want to
+  delete. The currently-logged-in user cannot be removed from
+  their own session — the Remove button is replaced with
+  "current session" for that row. Log in as a different
+  authentication user to remove the original.
+
+Removing a user (terminal alternative):
+  Edit interface_auth.json directly to remove the user's entry.
+  Be careful not to remove the only authentication user — the
+  interface will prompt for first-run setup on next start, which
+  is recoverable but disruptive.
+
+Changing your password:
+  In v1, password changes still require terminal access. The
+  procedure is:
+
+    1. Log in to the host with shell access.
+    2. Stop the interface temporarily:
+         sudo systemctl stop jrsoctriage-interface  (or your
+         equivalent stop method)
+    3. Edit interface_auth.json directly OR delete and recreate
+       your user via --add-user (this rotates the TOTP secret).
+    4. Restart the interface.
+
+  For most users the safest path is to delete and recreate
+  your account, accepting the cost of re-pairing the
+  authenticator app. A GUI password-change flow that preserves
+  the TOTP secret is on the roadmap.
+
+Resetting all credentials:
+  Delete interface_auth.json and restart the interface. This
+  triggers the first-run setup flow, where a fresh username,
+  password, and TOTP secret are created interactively in the
+  terminal. Use this when you have lost access to all accounts.
+
+------------------------------------------------------------
+LOGIN BEHAVIOR AND TIMEOUTS
+------------------------------------------------------------
+
+Idle timeout: sessions expire after a configurable idle period.
+Default 30 minutes. Walking away from the keyboard for longer
+than that requires re-login. Each authenticated request bumps
+the idle timer, so active use never times out.
+
+Configure via config.json: interface.session_timeout_minutes.
+Valid range: 1 minute to 24 hours (1440 minutes). Values outside
+this range are clamped automatically.
+
+Server restart: sessions are also invalidated on every restart
+of interface.py. The session-signing key is regenerated on each
+launch, which makes existing session cookies fail signature
+validation. Combined with the idle timeout, this gives two
+independent layers of session expiration.
+
+Login rate limiting: per-IP protections against brute-force.
+  - 4-second cooldown between consecutive login attempts
+  - After 3 failed attempts, the IP is locked out for 3 minutes
+  - Successful login clears the failure counter
+
+Rate limit state is in-memory only and resets on server
+restart. This is intentional — a determined attacker cannot
+persist their attempt history across server restarts as a
+side-channel.
+
+Auth file integrity: if interface_auth.json becomes corrupt or
+its structure is invalid, the interface refuses to start with
+an explanatory error. This prevents a corrupt-file scenario
+from silently triggering first-run setup, which would let an
+attacker create a new admin account by deliberately corrupting
+the file.
+
+------------------------------------------------------------
+LOOKUP
+------------------------------------------------------------
+
+Reverse lookup anonymized aliases to real identifiers. Use this
+when the LLM response contains aliases (e.g. host-f, user-3) and
+you need to know which real system or user that corresponds to.
+
+The tab has two ways to find a mapping:
+
+  Search box        - Type any portion of an alias or real value.
+                      Searches across hosts, users, domains, and
+                      IPs. Substring match, case-insensitive.
+                      Results show both directions of the mapping.
+
+  Browsable tables  - Four tables below the search box list every
+                      mapping in the system, grouped by type:
+                        - Host Aliases      (real hostname → alias)
+                        - User Aliases      (real username → alias)
+                        - Domain Aliases    (real domain → alias)
+                        - IP Aliases        (real IP → alias)
+                      Useful when you want to scroll for an alias
+                      you don't remember, or audit what aliases
+                      exist.
+
+Read-only - no save.
+
+------------------------------------------------------------
+MAINTENANCE
+------------------------------------------------------------
+
+Put a host into maintenance mode for a fixed duration. While in
+maintenance mode, non-external alerts from that host are suppressed
+from LLM triage. External-IP alerts still escalate normally so a
+real intrusion attempt during a maintenance window still gets
+caught. All alerts continue to ship to Graylog regardless of
+maintenance state.
+
+Use this when you are about to do something that will generate
+benign noise on a known host — apt upgrades, package installs, FIM
+baseline churn from a configuration change, kernel updates, etc.
+Set maintenance BEFORE you make the change so the storm gets
+absorbed.
+
+Tab layout:
+
+  Status banner     - Appears above the active list when you Set or
+                      Clear maintenance. Green for success, amber
+                      while the action is in flight, red on error.
+                      Auto-clears when you change the host or
+                      duration selection — keeps the banner from
+                      lingering across actions.
+
+  Currently In      - Lists every host currently in maintenance with
+  Maintenance         a countdown ("47m"), the Set By field
+                      (user:<username> for GUI sets, "manual" for CLI
+                      sets), and a Clear button per row.
+                      Auto-refreshes every 30 seconds while the tab
+                      is open.
+                      Empty state placeholder reads "No hosts
+                      currently in maintenance mode."
+
+  Set Maintenance   - Pick a host from the dropdown (populated from
+  Mode                hosts.json on first tab load). Pick a duration
+                      from the dropdown (15 / 30 / 60 / 120 / 240 /
+                      480 minutes). Click Set Maintenance.
+                      The pipeline applies the change on its next
+                      poll cycle (within poll_interval, default 30
+                      seconds).
+
+Clear button behavior:
+  Clicking Clear prompts for confirmation ("Clear maintenance mode
+  for HOST? Alerts from this host will resume normal LLM triage
+  immediately.") before clearing. This avoids accidental clears
+  while still being a single click for legitimate cancellations.
+
+Audit trail:
+  Set and Clear actions write a logger.info line to the interface
+  service journal with the authenticated username, e.g.:
+    Maintenance set: dmz-web-01 for 60m by user:analyst
+    Maintenance cleared: dmz-web-01 by user:analyst
+
+Implementation note:
+  The Maintenance tab is a thin GUI shell over the maintenance.py
+  CLI. The interface shells out to "/usr/bin/python3 maintenance.py"
+  with the appropriate flags rather than reimplementing the logic.
+  Both the GUI and direct CLI usage write to the same database table,
+  so you can set via GUI and clear via CLI (or vice-versa). See
+  running_instructions.txt → STORM MANAGEMENT → MAINTENANCE MODE
+  for the CLI commands.
+
+------------------------------------------------------------
+RESTART
+------------------------------------------------------------
+
+Restart jrsoctriage and capture startup output. The tab has two
+buttons:
+
+  Restart jrsoctriage - Runs "sudo systemctl restart jrsoctriage"
+                        and displays the first 60 lines of startup
+                        output, so you can confirm:
+                          - Configuration loaded cleanly
+                          - All endpoints connected
+                          - Zeek, ntopng, Graylog available
+                          - Rules engine loaded expected number
+                            of entries
+                          - Pipeline entered main loop
+
+  Check Status        - Runs "systemctl status jrsoctriage" and
+                        displays the result without restarting.
+                        Use this to verify the service is healthy
+                        without disrupting the pipeline.
+
+If the pipeline fails to start, the captured output will show the
+error and you can correct the config before trying again.
+
+This tab performs the same actions as running the equivalent
+systemctl commands from the command line, with the output
+captured for you in the browser.
+
+
+============================================================
+COMMON MISTAKES
+============================================================
+
+Saving without restarting - Changes to config.json, rules.json,
+anonymization.json, users.json, domain.json, and ip_aliases.json
+require a pipeline restart. Network and host changes do not.
+When in doubt, restart.
+
+Editing while the service is running - Safe for all tabs, but
+changes won't take effect until restart. The pipeline holds its
+config in memory once loaded.
+
+Not verifying after save - Always refresh the tab and confirm
+your changes persisted. The status bar will show errors, but
+a visual confirmation catches cases where the save partially
+succeeded.
+
+Forgetting anonymization applies per-endpoint - The master switch
+in the Anonymization tab controls WHAT is anonymized. The
+per-endpoint toggle in Config controls WHETHER that endpoint
+receives anonymized data. Both must be set correctly.
+
+Adding notes with backticks or dollar signs - Avoid these in
+rule notes, host notes, and prompt customization. They can
+interfere with the template rendering. Stick to plain text.
+
+
+============================================================
+SETTINGS NOT EXPOSED IN THE INTERFACE
+============================================================
+
+A small number of advanced settings live in config.json but do
+not have a UI field. Edit config.json directly and restart to
+use these.
+
+logging.level (string, default "info")
+  Overall log verbosity. "info", "warning", or "error".
+
+All other config.json fields should be edited through the
+interface when possible. Directly editing config.json is fine
+but bypasses the Load Defaults merge that fills in missing fields.
+

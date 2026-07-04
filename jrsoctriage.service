@@ -1,0 +1,49 @@
+[Unit]
+Description=jrSOCtriage AI Security Triage Pipeline
+After=network-online.target docker.service
+Wants=network-online.target
+
+# ----------------------------------------------------------------------------
+# IMPORTANT: Edit WorkingDirectory below if your install is not at
+# /mnt/appdata/jrsoctriage.
+#
+# The pipeline (main.py) uses system Python — its only third-party
+# dependency is `requests`, which is typically already available. If
+# `requests` is not installed system-wide, install it via:
+#     sudo apt install python3-requests        # Debian/Ubuntu
+#     sudo dnf install python3-requests        # Fedora/RHEL
+#     pip install requests --break-system-packages    # any distro
+#
+# The interface (interface.py) uses a venv. See
+# jrsoctriage-interface.service for that unit file.
+# ----------------------------------------------------------------------------
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/appdata/jrsoctriage
+ExecStart=/usr/bin/python3 main.py
+Restart=on-failure
+RestartSec=30
+
+# Graceful shutdown can take longer than systemd's typical default of 90
+# seconds. When SIGTERM arrives, the pipeline lets in-flight LLM calls
+# finish before exiting — a single local-Ollama call can take 15-20s,
+# and a worst-case parallel batch with cloud fallback retries can easily
+# stretch to 2-3 minutes. We raise TimeoutStopSec to 5 minutes so a
+# normal restart drains cleanly instead of hitting SIGKILL midway through.
+#
+# Tradeoff: a genuinely-stuck pipeline takes 5 minutes to force-kill
+# instead of 30 seconds. That's the right tradeoff because SIGKILL on a
+# live pipeline can leave SQLite in WAL-pending state and lose in-memory
+# dedup state, causing alert reprocessing on next start. Atomic state
+# writes (interface.py save_json, ingest.py save_position) protect the
+# persistent state regardless, but the in-memory state is still worth
+# preserving when shutdown is graceful.
+TimeoutStopSec=300
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

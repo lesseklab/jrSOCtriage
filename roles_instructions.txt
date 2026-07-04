@@ -1,0 +1,107 @@
+jrSOCtriage - roles.json Reference
+==================================
+
+OVERVIEW:
+roles.json defines reusable host roles. A role lets you write "what is normal
+for this kind of host" ONCE and attach it to every host that fills that role,
+instead of repeating the same context in each host's notes. Write a
+"sales_laptop" role one time, tag 200 sales laptops with it (in hosts.json),
+and every one of them carries that context into triage — maintained in one
+place.
+
+When a host alerts, the LLM is shown the description and notes of all of that
+host's roles. A host references roles by name in its hosts.json "role" field,
+which may be a single name or a list (see hosts_instructions.txt).
+
+roles.json is OPTIONAL. A deployment with no roles.json runs fine — hosts with
+a "role" value just contribute the role name with no extra context. Like
+hosts.json, roles.json is re-read on each alert, so changes take effect with
+no pipeline restart.
+
+============================================================
+FORMAT
+============================================================
+
+A "roles" array of role objects. Each object has three fields:
+
+{
+  "roles": [
+    {
+      "name": "vm_host",
+      "description": "Hypervisor / virtual-machine host.",
+      "notes": "High internal connection counts, bridge/virtual interfaces, and inter-VM traffic are expected and not anomalous."
+    },
+    {
+      "name": "domain_controller",
+      "description": "Active Directory domain controller. Also runs DHCP and DNS.",
+      "notes": "Heavy port-53 DNS query traffic and DHCP lease activity are normal. NTLM/Kerberos/LDAP replication between DCs is expected AD activity, not lateral movement."
+    },
+    {
+      "name": "sales_laptop",
+      "description": "Sales-team laptop (mobile / roaming).",
+      "notes": ""
+    }
+  ]
+}
+
+============================================================
+FIELDS
+============================================================
+
+name          (required)
+              The role identifier. This is the name a host references in its
+              hosts.json "role" field, and what appears in the interface Roles
+              tab and the host role dropdown. Matching is case-insensitive.
+              Keep names short and consistent (e.g. vm_host, domain_controller,
+              soc_sensor). Names are the unique key — one entry per name.
+
+description   (optional)
+              A short label of what the role is, e.g. "Hypervisor host" or
+              "Sales-team laptop". Shown to the LLM as host context. Available
+              immediately — even a description alone gives the LLM useful
+              context, so you can define roles up front before you have
+              worked out their full behavior.
+
+notes         (optional)
+              The reusable triage context: what traffic and behavior is normal
+              for this kind of host. This is the payload that would otherwise
+              be repeated in every host's notes. Often left blank at first and
+              filled in later, once you have seen what is normal for these
+              hosts in your environment.
+
+A role with both description and notes blank is a "stub" — it shows as "New"
+on the interface Roles tab. Stubs are usually auto-created when a host
+references a role that does not exist yet; fill in either field to graduate
+it from "New".
+
+============================================================
+GRANULARITY GUIDANCE
+============================================================
+
+When deciding whether something is its own role or just part of another
+role's description:
+
+  - BUNDLE behaviors that always travel together into one role's description.
+    A domain controller almost always also runs DHCP and DNS, so those go in
+    the "domain_controller" description rather than becoming separate roles —
+    you would never have a DC without them.
+
+  - SPLIT OUT a capability that varies independently into its own role. A
+    Samba file server is not implied by any other role (a hypervisor or a
+    workstation is not necessarily a file server), so "samba_server" earns
+    its own role — and is then reusable on the next file server without
+    dragging along unrelated context.
+
+This keeps the role count low while keeping each role reusable. A host is the
+sum of its roles, so compose a multi-purpose host (e.g. a box that is a
+hypervisor AND a workstation AND a file server) from several focused roles
+rather than one frankenstein role you can never reuse.
+
+============================================================
+EDITING
+============================================================
+
+The interface Roles tab is the recommended way to edit roles.json — it
+provides add/delete, the "New" stub marking, and a dropdown of existing role
+names when assigning roles to hosts. Hand-editing roles.json directly is
+supported; the file is re-read on each alert.

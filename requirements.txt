@@ -1,0 +1,77 @@
+# jrSOCtriage - Python Requirements
+# Run on Python 3.13, 3.14, 3.14.4, 3.14.6, and 3.14t (free-threaded).
+# 3.12 may work but has not been tested.
+# 3.14t is the free-threaded (GIL-disabled) build.
+# Python 3.14 requires explicit resource lifecycle management: under
+# 3.14.x, implicitly-cleaned sqlite connections and sockets accumulated
+# file descriptors in hot paths — see running_instructions.txt for FD
+# lifecycle notes. The codebase already handles this; the note is
+# for anyone reading the source.
+#
+# ============================================================
+# CORE DEPENDENCIES (required for all configurations)
+# ============================================================
+requests>=2.28.0          # HTTP client - Graylog API, Ollama/llama.cpp LLM, AbuseIPDB, GeoIP, whois
+dnspython>=2.8.0          # Thread-safe reverse DNS for ptr_lookup/rdns_lookup
+                          # (replaced legacy socket.gethostbyaddr to avoid
+                          # process-global socket.setdefaulttimeout state)
+
+# ============================================================
+# ALL OTHER DEPENDENCIES ARE PYTHON STANDARD LIBRARY
+# ============================================================
+# datetime, json, logging, os, re, signal, smtplib, socket,
+# sqlite3, subprocess, sys, time, zlib, gzip, ipaddress,
+# email.mime, pathlib
+#
+# ============================================================
+# MINIMUM WORKABLE CONFIGURATIONS
+# ============================================================
+#
+# WAZUH ONLY (no Graylog, no Zeek, no Suricata):
+#   - Set sources.graylog.enabled: false
+#   - Set sources.zeek.enabled: false (or omit zeek log_dir)
+#   - Pipeline will triage Wazuh alerts with no network context
+#   - LLM reasoning will be limited to host-local events only
+#
+# SURICATA ONLY:
+#   - Not currently supported as a standalone configuration.
+#     Suricata alerts must be forwarded through Wazuh to enter the pipeline.
+#     The pipeline reads from Wazuh alerts.json, not Suricata eve.json directly.
+#     See IDEAL CONFIGURATION for the correct Suricata + Wazuh setup.
+#
+# IDEAL CONFIGURATION (full stack):
+#   - Wazuh agents on all hosts
+#   - Suricata going to Wazuh (Wazuh normalizes Suricata severity
+#     into unified rule levels — enables consistent min_rule_level
+#     filtering across all alert sources)
+#   - Graylog aggregating all logs (enables context_logs in prompt)
+#   - Zeek on SPAN port (enables network flow context in prompt)
+#   - ntopng on SPAN port (enables L7 application protocol detection
+#     in active flows — TLS.Google, UDP/Syslog, TCP/TLS.Azure etc.)
+#   - Ollama or llama.cpp running local LLM (gemma4:26b recommended on RTX 3090)
+#   - AbuseIPDB API key (enables abuse score escalation)
+#
+# ============================================================
+# OPTIONAL EXTERNAL SERVICES (no pip install required)
+# ============================================================
+#
+# hosts.json - optional but strongly recommended. Provides host role,
+#              VLAN, and behavioral context to the LLM. Without it,
+#              all hosts appear as "Unknown" and LLM reasoning is
+#              limited to IP and log context only. If hosts.json is
+#              absent or incomplete, inclusive internal DNS (PTR records
+#              for all hosts) is recommended so canonical hostnames can
+#              be resolved automatically.
+#
+# AbuseIPDB  - free API key at abuseipdb.com, set in config.json
+# ip-api.com - free GeoIP, no key required (rate limited)
+# Ollama or llama.cpp - install separately (ollama.ai or the llama.cpp
+#              repo); neither is a pip package.
+#              LLM triage can be disabled (llm.enabled: false in config.json)
+#              Without LLM, the pipeline still runs fully — alerts are ingested,
+#              enriched, deduplicated, and shipped to Graylog with all context
+#              fields (GeoIP, AbuseIPDB, Zeek flows, host metadata, baseline).
+#              Useful if no GPU is available or enrichment-only mode is desired.
+# Email/SMTP - required only if email.enabled: true in config.json
+#              Gmail app password recommended; Graylog alerts are a
+#              viable alternative that requires no SMTP configuration

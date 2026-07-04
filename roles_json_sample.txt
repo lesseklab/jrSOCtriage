@@ -1,0 +1,44 @@
+{
+  "roles": [
+    {
+      "name": "vm_host",
+      "description": "Hypervisor / virtual-machine host.",
+      "notes": "High internal connection counts, bridge/virtual interfaces, and inter-VM traffic are expected and not anomalous. Traffic to and from many internal IPs originating here is normal hypervisor behavior."
+    },
+    {
+      "name": "domain_controller",
+      "description": "Active Directory domain controller. Also runs DHCP and DNS.",
+      "notes": "Heavy port-53 DNS query traffic and DHCP lease activity are normal. Frequent NTLM/Kerberos/LDAP and replication traffic between domain controllers is expected AD activity, not lateral movement."
+    },
+    {
+      "name": "samba_server",
+      "description": "Linux SMB/CIFS file server (Samba).",
+      "notes": "Inbound SMB/CIFS connections and the Suricata SMB-protocol alerts they generate are expected file-sharing activity, not intrusions. Weight SMB-stream Suricata alerts to this host accordingly."
+    },
+    {
+      "name": "windows_workstation",
+      "description": "Interactive Windows desktop used by a person.",
+      "notes": "Browser, Office, Windows Update, and general user-application traffic is normal. Off-hours activity may still be background services (updaters, telemetry) rather than an active user."
+    },
+    {
+      "name": "linux_workstation",
+      "description": "Interactive Linux desktop used by a person.",
+      "notes": "Browser, package-manager, and developer-tool traffic is normal. Outbound connections to software repositories and CDN endpoints are expected."
+    },
+    {
+      "name": "soc_station",
+      "description": "Runs security operations tooling.",
+      "notes": "Elevated-access patterns and traffic to security infrastructure (Graylog, Wazuh, sensors) are expected. Administrative and API connections from this host to monitoring services are normal, not anomalous."
+    },
+    {
+      "name": "llm_host",
+      "description": "Serves local LLM inference endpoints (llama.cpp / Ollama).",
+      "notes": "Inbound API connections from the jrSOCtriage pipeline (e.g. on the model-serving port) and GPU-driven load are expected. Heavy request traffic from the pipeline host to this endpoint is normal triage operation, not data exfiltration."
+    },
+    {
+      "name": "sales_laptop",
+      "description": "Sales-team laptop (mobile / roaming).",
+      "notes": ""
+    }
+  ]
+}

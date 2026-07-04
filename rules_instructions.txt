@@ -1,0 +1,491 @@
+jrSOCtriage - rules.json Reference
+===================================
+
+OVERVIEW:
+rules.json provides per-rule control over how jrSOCtriage handles specific
+Wazuh rule IDs. It sits on top of the global config.json settings and allows
+surgical tuning without modifying code.
+
+Rules are evaluated after deduplication and before the LLM escalation decision.
+All enriched alerts are still shipped to Graylog regardless of rules.json —
+rules.json only controls whether an alert reaches the LLM and generates email.
+
+Unlike hosts.json (which reloads dynamically), changes to rules.json require
+a pipeline restart to take effect. The web interface's Restart tab is the
+fastest way to apply rule changes after editing.
+
+============================================================
+OPTIONAL STARTER PACK: rules.json.kevin
+============================================================
+
+The repo ships rules.json.sample as an empty rules array. The pipeline runs
+fine with no rule overrides — global config.json settings handle every alert.
+
+A second file, rules.json.kevin, is also included in the repo. It contains
+the rule overrides the project author runs in production against a typical
+Wazuh ruleset. These cover noisy built-in rules that tend to storm in most
+environments:
+
+  550   FIM integrity check (apt upgrade noise)
+  510   rootcheck PAM false positive on modern Linux
+  533   netstat port change (Zeek/Docker restart noise)
+  752   File/registry entry added (package install noise)
+  2902  Audit: command execution (admin activity noise)
+  2904  Audit: elevated/sudo command execution (admin activity noise)
+  23504 Vulnerability detector (rate-limit storm, never suppress)
+  23505 Vulnerability detector (rate-limit storm, never suppress)
+  23506 Vulnerability detector (rate-limit storm, never suppress)
+
+To use it as a starting point:
+
+  cp rules.json.kevin rules.json
+
+Then restart jrsoctriage to apply.
+
+IMPORTANT: Review every entry against your own Wazuh ruleset before relying
+on it. Rule IDs and meanings can vary between Wazuh versions and custom
+rule packs. A rule that is benign noise in one environment may be a real
+signal in another. The Rules tab in the web interface lets you edit or
+delete entries individually.
+
+The pipeline does NOT reference rules.json.kevin directly — it is purely
+a starting template. The active file is always rules.json.
+
+============================================================
+FILE LOCATION
+============================================================
+
+Default: /path/to/jrsoctriage/rules.json
+Configurable in config.json under paths.rules_file
+
+============================================================
+EDITING: USE THE INTERFACE
+============================================================
+
+The web interface (Rules tab) is the recommended way to edit
+rules.json. The interface enforces structure at save time — rule
+conditions must be lists, host_notes must be an object, rule_id
+must be present, and so on.
+
+If you edit rules.json directly in a text editor, the pipeline
+will tolerate common structural errors: individual malformed
+rules are logged and skipped rather than crashing the whole
+engine. This means a typo can silently disable one rule while
+the rest of the engine continues running.
+
+To validate a hand-edited rules.json: open the Rules tab in the
+interface and click Save Rules. The interface normalizes the
+structure and surfaces any errors in the status bar. If it saves
+cleanly, the file is valid.
+
+============================================================
+FILE STRUCTURE
+============================================================
+
+{
+  "rules": [
+    { ... rule entry ... },
+    { ... rule entry ... }
+  ]
+}
+
+Each entry in the rules array targets a single Wazuh rule ID.
+If a rule ID is not in rules.json, global config.json settings apply.
+
+============================================================
+RULE ENTRY FIELDS
+============================================================
+
+rule_id (required)
+  The Wazuh rule ID as a string.
+  Example: "rule_id": "550"
+
+comment (recommended)
+  Human-readable explanation of why this rule entry exists.
+  Not used by the pipeline — for your own documentation.
+  Example: "comment": "FIM - apt upgrade noise, suppress internal storms"
+
+note (optional)
+  Free-text site-specific note that is injected into every LLM prompt
+  when this rule fires, on ANY host. Use it to explain what this rule
+  normally means in your environment and under what conditions it
+  should be treated as benign. This is the preferred mechanism over
+  never_escalate — it guides the LLM toward the right verdict without
+  creating a blind spot.
+
+  Example:
+  "note": "Rule 60608 is Windows Error Reporting (WER). Common benign
+   sources: Dell management agents, Edge updater, .NET runtime
+   failures. Recurring crashes on the same process are worth tracking
+   as NOTEs. Flag unfamiliar processes or ones related to security
+   tooling."
+
+host_notes (optional)
+  Per-host rule notes. A dict keyed by canonical hostname. When the
+  rule fires on a matching host, that host's note is appended to the
+  prompt alongside the global "note" field. Use when a single rule
+  means very different things on different hosts.
+
+  Hostname matching is case-insensitive against the canonical
+  hostname resolved by the pipeline (same value that appears in
+  gl2_canonical_hostname).
+
+  Classic example: rule 504 (Wazuh agent disconnected) is expected
+  on a laptop that sleeps but NOTIFY-worthy on a domain controller.
+
+  Example:
+  "host_notes": {
+    "Laptop1":            "Travel laptop. Frequent disconnects expected when asleep or off-VPN.",
+    "Workstation1":       "Gaming workstation. Disconnect during shutdown/sleep is normal.",
+    "Domain_Controller":  "Primary domain controller. Disconnect is a NOTIFY-worthy incident.",
+    "Domain_Controller2": "Secondary domain controller. Disconnect warrants immediate investigation.",
+    "Hypervisor1":        "Production hypervisor. Disconnect must be investigated."
+  }
+
+  Both note and host_notes are edited in the Rules tab of the web
+  interface. The Hosts tab manages host inventory only, not rule
+  behavior — all rule-specific notes live with the rule.
+
+------------------------------------------------------------
+DEDUPLICATION
+------------------------------------------------------------
+
+dedup_silence_seconds (optional)
+  Per-rule override of the global dedup_silence_seconds in config.json.
+  Identical rule+host combinations within this window are collapsed.
+  Default: global config value (currently 240 seconds)
+
+  Example: silence FIM alerts for 1 hour per host during storms
+  "dedup_silence_seconds": 3600
+
+------------------------------------------------------------
+ESCALATION CONTROL
+------------------------------------------------------------
+
+never_escalate (optional, default: false)
+  Hard suppress — this rule never reaches the LLM regardless of any
+  other conditions or escalation overrides. Alert is still enriched
+  and shipped to Graylog.
+
+  WARNING: Use only for rules that are confirmed false positives in
+  your environment. Never use on vulnerability, authentication,
+  privilege escalation, or attack-group rules.
+
+  Example: "never_escalate": true
+
+------------------------------------------------------------
+CONDITIONAL ESCALATION
+------------------------------------------------------------
+
+escalate_if (optional)
+  List of conditions that must ALL be true for this rule to escalate
+  to the LLM via the NORMAL level-based path. If conditions are not
+  met, the alert is suppressed from LLM triage. Alert still ships to Graylog.
+
+  IMPORTANT: escalate_if only controls the normal escalation path.
+  The following escalation overrides BYPASS escalate_if entirely and
+  will always reach the LLM regardless of your conditions:
+    - force_escalate_if conditions in this rule entry
+    - Global escalation overrides in config.json:
+        * Rule level >= min_rule_level (e.g., level 6+)
+        * AbuseIPDB score >= abuse_escalation_threshold
+        * Alert count > escalation_multiplier x daily baseline
+        * IP in always_include networks or hosts
+        * First-seen rule+host combination (if escalate_first_seen_rule: true)
+
+  In practice, escalate_if is most useful for rules that fire BELOW
+  min_rule_level but you still want conditional escalation — or for
+  adding extra conditions on top of normal level filtering.
+
+  If escalate_if is absent, normal min_rule_level filtering applies.
+  If escalate_if is present, ALL conditions must pass (AND logic by default).
+  Add "condition_logic": "OR" at the rule level for OR evaluation.
+
+  Example: only escalate FIM via normal path if external IP is involved
+  (high abuse score or baseline spike will still escalate regardless)
+  "escalate_if": [
+    {"field": "external_ips", "op": "exists"}
+  ]
+
+  Example: only escalate if level is high AND external IP present
+  "escalate_if": [
+    {"field": "external_ips", "op": "exists"},
+    {"field": "gl2_rule_level", "op": "gte", "value": 7}
+  ]
+
+force_escalate_if (optional)
+  List of conditions — if conditions are met, this rule bypasses
+  min_rule_level and is always sent to the LLM. Equivalent to the
+  existing escalation override system but per-rule.
+
+  Default behavior is ALL conditions must be true (AND), matching
+  escalate_if. Add "condition_logic": "OR" at the rule level to
+  trigger if ANY condition is true.
+
+  Example: always escalate P2P rule if external IP present
+  "force_escalate_if": [
+    {"field": "external_ips", "op": "exists"}
+  ]
+
+  Example: always escalate if abuse score is high
+  "force_escalate_if": [
+    {"field": "gl2_abuse_score", "op": "gte", "value": 50}
+  ]
+
+  Example: escalate on EITHER trigger (OR mode)
+  "force_escalate_if": [
+    {"field": "external_ips", "op": "exists"},
+    {"field": "gl2_abuse_score", "op": "gte", "value": 50}
+  ],
+  "condition_logic": "OR"
+
+condition_logic (optional, default: "AND")
+  Controls how multiple conditions in escalate_if and
+  force_escalate_if are combined.
+
+  "AND" (default) - All listed conditions must be true.
+  "OR"            - Any one listed condition triggers.
+
+  Applies to both escalate_if and force_escalate_if in the same
+  rule entry — the same logic mode is used for both. If you need
+  AND for one and OR for the other in the same rule, split the
+  logic into a single combined list under whichever predicate
+  fits, or use multiple rules.
+
+  Example: trigger on either of two failure modes
+  {
+    "rule_id": "60204",
+    "force_escalate_if": [
+      {"field": "external_ips", "op": "exists"},
+      {"field": "gl2_abuse_score", "op": "gte", "value": 50}
+    ],
+    "condition_logic": "OR"
+  }
+
+PRECEDENCE ORDER:
+  1. never_escalate — hard stop, nothing overrides this
+  2. Global escalation overrides (config.json) — these BYPASS escalate_if
+     conditions entirely and always reach the LLM regardless of rules.json:
+       - Rule level >= min_rule_level (e.g., level 6+)
+       - AbuseIPDB score >= abuse_escalation_threshold
+       - Alert count > escalation_multiplier x daily baseline average
+       - IP in always_include networks or hosts list
+  3. First-seen escalation — if escalate_first_seen_rule is enabled and
+     this rule+host has never fired in the lookback window, always escalate
+     once regardless of rule level or escalate_if conditions.
+  4. force_escalate_if — if conditions are met under the rule's
+     condition_logic, always escalate regardless of rule level
+  5. escalate_if — if present, ALL conditions must pass for normal-path
+     escalation. Does NOT block overrides from steps 2-4.
+  6. max_escalations_per_hour — applied after escalation is confirmed
+  7. Normal min_rule_level filtering if no matching rule entry exists
+
+  The key insight: escalate_if reduces noise on the normal escalation
+  path. It does not create a security blind spot because global overrides
+  (abuse scores, baseline spikes, always_include networks) still fire
+  regardless of your escalate_if conditions.
+
+------------------------------------------------------------
+RATE LIMITING
+------------------------------------------------------------
+
+All rate limits are tracked per host by default. A storm on HOSTNAME
+does not affect the quota for dmz-web-01 or Domain_Controller. Each host maintains its own
+independent counter for each rule. Use rate_limit_scope: "rule" to
+override this and share a single quota across all hosts.
+
+max_escalations_per_hour (optional)
+  Maximum number of times this rule reaches the LLM per hour.
+  Counted per host by default (rate_limit_scope: "host").
+  Once the limit is hit, further escalations are silently skipped
+  until the next hour window. Alert still ships to Graylog.
+
+  Example: cap FIM LLM calls to 2 per host per hour
+  "max_escalations_per_hour": 2
+
+rate_limit_scope (optional, default: "host")
+  Controls how the rate limit counter is bucketed.
+
+  "host" (default) — counter is rule_id|canonical_hostname
+    Each host gets its own independent quota.
+    A storm on HOSTNAME does not consume dmz-web-01's quota.
+
+  "rule" — counter is rule_id only
+    All hosts share a single quota for this rule.
+    Use when you want a global cap regardless of which host fires.
+
+  Example: global cap of 5 Suricata applayer alerts per hour
+  "max_escalations_per_hour": 5,
+  "rate_limit_scope": "rule"
+
+------------------------------------------------------------
+MAINTENANCE MODE
+------------------------------------------------------------
+
+Maintenance mode is a runtime flag you can set per host to temporarily
+suppress non-external LLM escalations. Useful when doing planned
+system changes (apt upgrade, new software installs, config changes)
+that would otherwise generate storms.
+
+Set maintenance mode:
+  python3 maintenance.py --host HOSTNAME --minutes 60
+
+Clear maintenance mode:
+  python3 maintenance.py --host HOSTNAME --clear
+
+While a host is in maintenance mode:
+  - Alerts with external_ips present still escalate normally
+  - Alerts with no external_ips are suppressed from LLM
+  - All alerts still ship to Graylog
+  - A note is added to the prompt when maintenance mode is active
+
+Maintenance mode is stored in the SQLite database and survives restarts.
+It expires automatically after the specified duration.
+
+============================================================
+CONDITION REFERENCE
+============================================================
+
+Conditions evaluate fields from the enrichment dict.
+Format: {"field": "FIELD_NAME", "op": "OPERATOR", "value": "VALUE"}
+value is required for all operators except exists/not_exists.
+
+AVAILABLE FIELDS:
+  external_ips          List of external IPs in this alert
+  internal_ips          List of internal IPs in this alert
+  canonical_hostname    Resolved hostname of the alert host
+  gl2_rule_id           Wazuh rule ID (string)
+  gl2_rule_level        Wazuh rule level (integer)
+  gl2_abuse_score       AbuseIPDB score (integer) or "N/A"
+  agent_name            Raw Wazuh agent name
+  network               Network segment name of the agent's host
+                        (e.g., "vlan40", "vpn_wireguard"), or null
+                        if the agent IP didn't match any configured
+                        network in hosts.json
+
+  external_ips, internal_ips, agent_name, and network are
+  flat-aliased convenience fields that mirror data also available
+  via dotted paths in the enrichment dict (ips.external,
+  ips.internal, etc.). The flat names are the documented and
+  recommended form for use in conditions. Any other field present
+  in the enrichment dict is also valid via the same flat-name
+  syntax, and dotted paths are supported for nested fields if
+  needed.
+
+OPERATORS:
+  exists                Field is present and non-empty
+                        {"field": "external_ips", "op": "exists"}
+
+  not_exists            Field is absent or empty
+                        {"field": "external_ips", "op": "not_exists"}
+
+  eq                    Exact string match (case-insensitive)
+                        {"field": "canonical_hostname", "op": "eq", "value": "dmz-web-01"}
+
+  not_eq                Does not match
+                        {"field": "canonical_hostname", "op": "not_eq", "value": "Workstation1"}
+
+  contains              Substring match (case-insensitive)
+                        {"field": "agent_name", "op": "contains", "value": "web"}
+
+  in                    Value is in a list
+                        {"field": "canonical_hostname", "op": "in", "value": ["Domain_Controller", "Domain_Controller2"]}
+
+  not_in                Value is not in a list
+                        {"field": "canonical_hostname", "op": "not_in", "value": ["dmz-web-01"]}
+
+  gte                   Greater than or equal (numeric)
+                        {"field": "gl2_rule_level", "op": "gte", "value": 7}
+
+  lte                   Less than or equal (numeric)
+                        {"field": "gl2_abuse_score", "op": "lte", "value": 25}
+
+  gt                    Greater than (numeric)
+  lt                    Less than (numeric)
+
+  matches               Regex match
+                        {"field": "canonical_hostname", "op": "matches", "value": "^dc0[12]$"}
+
+============================================================
+SECURITY GUIDANCE
+============================================================
+
+escalate_if with external_ips exists is appropriate for:
+  - FIM/syscheck rules (550, 553, 554)
+  - Package installation rules (752)
+  - Port change rules (533)
+  - Process anomaly rules
+  - Any rule that generates storms during planned maintenance
+
+NEVER use never_escalate or external_ips-only escalate_if on:
+  - Vulnerability/rootcheck rules — internal threats are real
+  - Authentication failure rules — internal brute force is real
+  - Privilege escalation rules — local exploits have no external IP
+  - Any rule in the attacks, authentication_failed groups
+  - DMZ host rules — DMZ web servers should always escalate
+
+A local privilege escalation or compromised internal host does not
+need an external IP to be a serious incident. Rules that gate on
+external_ips for these categories create dangerous blind spots.
+
+============================================================
+EXAMPLE rules.json
+============================================================
+
+{
+  "rules": [
+    {
+      "rule_id": "550",
+      "comment": "FIM integrity check - suppress internal storms, apt upgrades etc.",
+      "note": "FIM checksum changes fire heavily during apt upgrades and config changes. Treat as SUPPRESS during documented maintenance windows. Flag if the modified path is a sensitive binary (/bin, /sbin, /usr/bin), a config file for a privileged service, or if no maintenance is scheduled.",
+      "dedup_silence_seconds": 3600,
+      "max_escalations_per_hour": 2,
+      "escalate_if": [
+        {"field": "external_ips", "op": "exists"}
+      ]
+    },
+    {
+      "rule_id": "504",
+      "comment": "Wazuh agent disconnected - meaning depends heavily on host",
+      "note": "Wazuh agent disconnected. Interpret per host role.",
+      "host_notes": {
+        "Laptop1":            "Travel laptop. Frequent disconnects expected when asleep or off-VPN.",
+        "Domain_Controller":  "Primary domain controller. Disconnect is a NOTIFY-worthy incident.",
+        "Domain_Controller2": "Secondary domain controller. Disconnect warrants immediate investigation."
+      },
+      "dedup_silence_seconds": 300
+    },
+    {
+      "rule_id": "510",
+      "comment": "rootcheck - confirmed FP on modern Linux, never escalate",
+      "note": "Rule 510 generic PAM signature matches legitimate /bin/passwd, /bin/ls, /usr/bin/ls on modern Linux. Verify with dpkg -V or rpm -V before acting.",
+      "never_escalate": true,
+      "dedup_silence_seconds": 3600
+    },
+    {
+      "rule_id": "533",
+      "comment": "netstat port change - suppress internal, Zeek restart noise",
+      "dedup_silence_seconds": 3600,
+      "max_escalations_per_hour": 2,
+      "escalate_if": [
+        {"field": "external_ips", "op": "exists"}
+      ]
+    },
+    {
+      "rule_id": "752",
+      "comment": "Registry/file entry added - suppress internal package installs",
+      "dedup_silence_seconds": 3600,
+      "max_escalations_per_hour": 2,
+      "escalate_if": [
+        {"field": "external_ips", "op": "exists"}
+      ]
+    },
+    {
+      "rule_id": "19502",
+      "comment": "Windows P2P - always escalate if external IP present",
+      "force_escalate_if": [
+        {"field": "external_ips", "op": "exists"}
+      ]
+    }
+  ]
+}

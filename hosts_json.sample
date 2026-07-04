@@ -1,0 +1,22 @@
+{
+  "hosts": [
+    {
+      "name": "example-host",
+      "role": "replace_with_role",
+      "os": "replace_with_os",
+      "vlan": 0,
+      "identifiers": {
+        "ip": "0.0.0.0"
+      },
+      "tags": ["example_tag"],
+      "notes": "Replace this with operational context for this host. The LLM reads these notes when triaging alerts involving this host. See hosts_instructions.txt for the full schema and field reference."
+    }
+  ],
+  "networks": [
+    {
+      "cidr": "10.0.0.0/24",
+      "name": "example-network",
+      "role": "replace_with_role"
+    }
+  ]
+}

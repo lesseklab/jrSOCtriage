@@ -1,0 +1,26 @@
+# jrSOCtriage web interface dependencies
+#
+# Install into a venv (recommended):
+#   cd /path/to/jrsoctriage
+#   python3 -m venv venv
+#   source venv/bin/activate
+#   pip install -r interface_requirements.txt
+#
+# Or system-wide (simpler but pollutes system Python):
+#   sudo pip install -r interface_requirements.txt --break-system-packages
+#
+# Transitive dependencies (Werkzeug, Jinja2, MarkupSafe, itsdangerous,
+# click, blinker) are resolved automatically by pip.
+
+Flask>=3.0,<4
+bcrypt>=4.0
+pyotp>=2.9
+qrcode>=7.4
+
+# Wazuh agent-import feature (wazuh_import.py, called from the Hosts tab).
+# The interface authenticates to the Wazuh management API (requests) and
+# verifies agent names/IPs against DNS (dnspython). These are also pipeline
+# dependencies, but the interface runs in its own venv, so they must be
+# declared here too or the import route fails with ModuleNotFoundError.
+requests>=2.28
+dnspython>=2.8

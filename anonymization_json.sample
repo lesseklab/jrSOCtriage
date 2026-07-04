@@ -1,0 +1,7 @@
+{
+  "hostnames": true,
+  "users": true,
+  "domain": true,
+  "ips": false,
+  "ip_mode": "all"
+}

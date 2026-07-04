@@ -1,0 +1,314 @@
+jrSOCtriage - hosts.json Reference
+===================================
+
+The web interface is the recommended way to edit hosts.json. The Hosts tab
+exposes every field documented below with helper text, validation, and
+inline notes management. Hand-editing hosts.json directly works fine but
+the GUI is faster for normal operations.
+
+Changes to hosts.json are reloaded dynamically by the running pipeline.
+No service restart is required after edits — the next alert sees the
+updated inventory.
+
+DESIGN PHILOSOPHY:
+DNS is the source of truth for host identity. Resolution priority is:
+  1. DNS PTR lookup (preferred — authoritative)
+  2. hosts.json name match
+  3. Wazuh agent.name (last resort fallback)
+
+hosts.json is not an identity database — it is a context database. It answers
+"what does this host do and what behavior is normal for it?" not "what is this
+IP address?" The pipeline uses DNS to establish identity, then looks up that
+identity in hosts.json to find behavioral context.
+
+DNS PREREQUISITE (important). jrSOCtriage assumes your hosts are registered
+in DNS - a forward record AND a reverse (PTR) record for each host's IP. In
+Active Directory this is largely automatic for the forward records (domain-
+joined machines self-register), but REVERSE zones and PTR records are NOT
+automatic - an admin has to create the reverse lookup zones and enable PTR
+registration deliberately. Several features lean on the PTR specifically:
+canonical-hostname resolution at alert time, and the Wazuh import / renumber
+verification (which is reverse-PTR-anchored). Without PTR records these may
+not work as intended - hosts can resolve as "Unknown host," and the import
+may not be able to verify agents.
+
+WORKING WITHOUT COMPLETE DNS. You do not strictly need DNS. Creating host
+entries MANUALLY works around most of the dependency - a host with an entry
+in hosts.json gets its context regardless of DNS state. The one requirement:
+the manual entry's NAME must match the Wazuh agent name (the pipeline's last-
+resort fallback is the agent name, so when DNS can't resolve, the agent name
+is what gets matched against hosts.json). Pin the IP with identifiers.ip if
+DNS can't confirm it. So a DNS-sparse shop can still run jrSOCtriage by hand-
+maintaining hosts.json with names that match the agents.
+
+ADDING PTR RECORDS (if you don't have them). Note that Active Directory does
+not auto-create reverse (PTR) records the way it does forward records - it's a
+common oversight. On a small network, adding PTR records by hand in DNS Manager
+(or enabling PTR registration in your DHCP scope) is quick. At larger scale,
+search for "tools to bulk-create PTR records" / "PTR record management" - there
+are several admin utilities (and most IPAM products) that automate it. This is
+standard DNS administration, outside jrSOCtriage's scope.
+
+If your network has comprehensive internal DNS with PTR records for all hosts,
+hosts.json entries can be minimal. If DNS is sparse or unreliable, use the
+identifiers.ip field (and a name matching the agent) to ensure hosts are
+matched correctly without DNS.
+
+hosts.json tells the pipeline who lives on your network. This context is
+included in every LLM prompt so the model can reason about whether activity
+is expected for a given host rather than treating every alert in isolation.
+
+hosts.json is optional. Without it, all hosts appear as "Unknown host" and
+the LLM has no behavioral context. If hosts.json is absent, inclusive internal
+DNS (PTR records for all hosts) is strongly recommended so canonical hostnames
+can at least be resolved from IPs.
+
+The more detail you provide, the better the LLM reasons. A note saying
+"Heavy SMB traffic to fedora is normal" prevents a false positive every time
+that traffic appears in Zeek flows.
+
+BUILDING THIS INVENTORY FROM WAZUH (don't hand-type it):
+If your hosts run Wazuh agents, you do not have to type these entries by
+hand. The Hosts tab can pull your agent list straight from the Wazuh API and
+turn it into host entries - verifying each agent's name and IP against DNS
+(the same DNS-is-authoritative principle above) so it sorts cleanly-verified
+hosts, IP mismatches, and misconfigured agents for you. On a network of any
+size this is the fast path to a populated inventory, and re-running it later
+keeps the inventory reconciled as the network changes. It also updates an
+existing host's IP without ever touching the notes or roles you wrote.
+  - Step-by-step:  interface_guide.txt, "WAZUH API - AGENT HOST IMPORT"
+  - Setup + ops:   running_instructions.txt, "BUILDING THE HOST INVENTORY
+                   FROM WAZUH (AGENT IMPORT)"
+
+KEEPING IPs CURRENT AFTER A RENUMBER (don't hunt for stale pins):
+If your network renumbers, or you suspect a stored static IP has gone
+stale, the "Re-verify IPs (Renumber)" button on the Hosts tab checks
+every host's stored IP against what Wazuh and DNS now agree on, and offers
+to fix only the ones that actually drifted. It also handles converting
+hosts between pinned-static and blank (resolve-live), which is useful when
+you move hosts onto - or off of - DHCP or MAC-reserved addressing. Only
+the IP changes; your notes and roles are never touched.
+  - Step-by-step:  interface_guide.txt, "RE-VERIFY IPs (RENUMBER)"
+                   (includes a worked example for pinning a few blank
+                   hosts to static)
+
+============================================================
+HOST FIELDS
+============================================================
+
+name          (required)
+              The hostname as it appears in Wazuh agent registration or DNS PTR.
+              Case-insensitive matching is used.
+
+              Matching is two-stage:
+              1. Exact match (case-insensitive). "HOST01" matches "host01".
+              2. First-label fallback. If exact match fails, the first
+                 label of the input is compared against the first label
+                 of each host's name. So "host01.example.local"
+                 matches "host01" in hosts.json, and "host01" matches a
+                 hosts.json entry stored as "host01.example.local".
+
+              The first-label fallback exists for environments where
+              Wazuh agents register with FQDNs while hosts.json uses
+              short names (or vice versa). For your environment you can
+              use whichever convention is most natural; the matcher
+              will figure it out.
+
+              Pick one convention and stay consistent for clarity.
+
+role          (recommended)
+              What the host does. May be a single role name (string) or
+              several (a list) for a host that fills more than one purpose,
+              e.g. a box that is both a hypervisor and a workstation.
+              Examples: workstation, domain_controller, vm_host, web_server,
+              firewall, soc_sensor, samba_server, mobile, iot, network_device
+
+              Single role:   "role": "web_server"
+              Multiple roles: "role": ["vm_host", "linux_workstation", "samba_server"]
+
+              Role names reference roles.json (see roles_instructions.txt),
+              where each role carries a reusable description and notes —
+              "what is normal for this kind of host" written once and applied
+              to every host with that role. When a host alerts, the LLM is
+              shown the description and notes of all of that host's roles.
+              A role name not yet defined in roles.json is auto-created as a
+              blank stub (editable on the interface Roles tab); a bare role
+              name with no roles.json entry still works, it just contributes
+              the name alone with no extra context. Matching is
+              case-insensitive.
+
+os            (recommended)
+              Operating system. Freeform.
+              Examples: windows_11_pro, windows_server, ubuntu, debian, fedora,
+              android, pfsense, unknown
+
+vlan          (recommended)
+              VLAN number the host lives on. Used to correlate with the networks
+              section for segment-level context in the prompt.
+
+tags          (optional)
+              List of behavioral tags. These are expanded into plain English
+              in the LLM prompt for clarity. Supported tags:
+
+              auto_updates    Host runs unattended automatic updates.
+                              Helps LLM suppress FIM/process alerts during
+                              update windows with higher confidence.
+
+              domain_joined   Host is joined to an Active Directory domain.
+
+              dmz             Host is in a DMZ segment. The LLM will treat
+                              unexpected outbound or internal contact as suspicious.
+
+              untrusted       Host is not managed or trusted (IoT, guest devices).
+                              LLM will weight alerts from this host more seriously.
+
+              critical        Critical infrastructure. LLM applies extra scrutiny.
+
+              transit         Transit network device. Not a typical alert source.
+
+              Any unrecognized tag is passed through as-is.
+
+notes         (highly recommended)
+              Freeform text describing expected behavior for this host.
+              This is the single most valuable field for LLM reasoning quality.
+              
+              Good notes explain:
+              - What the host is used for and by whom
+              - What traffic patterns are normal and why
+              - What would be suspicious or unexpected
+              - Any known noisy alert patterns that are benign
+              
+              Examples:
+              "Primary workstation. Heavy SMB traffic to fedora (mapped drive) is normal."
+              "Travel laptop. May appear on VPN (10.6.0.x). Non-technical user — financial browsing."
+              "AppArmor Docker audit events every 10s are normal container activity."
+              "Offline when not in use — unexpected activity when not intentionally started is suspicious."
+
+identifiers.ip (optional)
+              Explicit IP address(es) for hosts that don't have DNS PTR records
+              or whose hostnames can't be resolved automatically.
+              Required for DMZ hosts, IoT devices, and anything without DNS.
+
+              identifiers is a nested JSON object inside the host entry.
+              The IP value can be either a single string or a list of
+              strings — choose whichever fits the host:
+
+              Single IP (typical case):
+              {
+                "name": "myhost",
+                "role": "web_server",
+                "os": "debian",
+                "vlan": 40,
+                "identifiers": {
+                  "ip": "192.168.40.10"
+                },
+                "tags": ["dmz"],
+                "notes": "..."
+              }
+
+              Multiple IPs (host appears on multiple networks):
+              {
+                "name": "analyst-phone",
+                "role": "mobile",
+                "os": "android",
+                "identifiers": {
+                  "ip": ["192.168.10.45", "10.6.0.5"]
+                },
+                "notes": "Phone. LAN at home, VPN when traveling."
+              }
+
+              Use the list form when a single physical host legitimately
+              appears under multiple IPs — typical examples:
+              - A phone or laptop with both LAN and VPN addresses
+              - A server with multiple NICs on different VLANs
+              - An edge sensor that sees alerts from itself under
+                different interface IPs
+
+              The identifiers block sits at the same level as name, role,
+              os, vlan, tags, and notes — not nested inside any of them.
+              Do not include subnet mask or CIDR notation — just bare IP
+              addresses as strings. IPv4 and IPv6 are both supported.
+              IPv6 addresses are matched canonically — "2001:db8::1" and
+              "2001:DB8::1" and "2001:0db8:0000:0000:0000:0000:0000:0001"
+              all match the same host.
+
+============================================================
+NETWORKS SECTION
+============================================================
+
+The networks section maps CIDR ranges to names and roles. This appears in
+the NETWORK CONTEXT block of every LLM prompt, giving the model a map of
+your network segments.
+
+cidr          Network address in CIDR notation.
+name          Short identifier for the segment (used in prompt output).
+role          What this segment is for. Freeform but descriptive.
+              Examples: clients, windows_servers, linux_management, dmz_web,
+              attack_defend, vpn, transit
+
+Add all your network segments here including VPN ranges, transit links,
+and any segments you want the LLM to understand.
+
+OVERLAPPING NETWORKS:
+If multiple network entries cover the same IP (e.g., a /16 supernet
+plus a /24 inside it), the first matching entry in the list wins. The
+pipeline does not pick the most specific match — it picks the first
+match in JSON order.
+
+If you have overlapping networks, list the most specific ones first.
+For most environments this doesn't come up — flat /24s for each VLAN
+work cleanly without overlap.
+
+============================================================
+TIPS FOR WRITING GOOD NOTES
+============================================================
+
+Think about what you would want to know when investigating an alert from
+this host at 3am. What context would immediately tell you whether to
+act or go back to sleep?
+
+Good questions to answer in notes:
+  - Who uses this host and how?
+  - What services run on it?
+  - What external connections are expected?
+  - What internal connections are expected?
+  - What Wazuh alert patterns are known false positives on this host?
+  - Is it normally on or offline?
+  - Does it have unusual network presence (VPN, multiple VLANs)?
+
+The notes field is included verbatim in the LLM prompt. Write it as if
+you are briefing a colleague who has never seen your network before.
+
+============================================================
+EXAMPLE HOST ENTRY (fully annotated)
+============================================================
+
+{
+  "name": "webserver01",
+  "role": "web_server",
+  "os": "debian",
+  "vlan": 40,
+  "identifiers": {
+    "ip": "YOUR_DMZ_HOST_IP"
+  },
+  "tags": ["dmz"],
+  "notes": "Production web server in DMZ. Serves HTTPS on port 443 only,
+            forwarded from pfSense. No DNS A record. Minimum Debian install.
+            Any unexpected outbound traffic, non-443 inbound, or contact with
+            internal segments should be treated as suspicious."
+}
+
+============================================================
+WHAT HAPPENS WITHOUT A HOST ENTRY
+============================================================
+
+If an alert fires from a host not in hosts.json:
+  - The pipeline attempts PTR lookup to resolve a hostname from the IP
+  - If PTR fails, the agent name from Wazuh is used as-is
+  - The host description in the prompt shows "Unknown host"
+  - The LLM has no role, VLAN, or behavioral context for the host
+  - The LLM will typically flag MISSING INFO for host context
+
+This is not a failure — the pipeline keeps working. But LLM reasoning
+quality is significantly better with host entries, especially for suppressing
+known-benign patterns on specific hosts.

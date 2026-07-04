@@ -1,0 +1,231 @@
+jrSOCtriage - Useful Graylog Searches
+======================================
+
+All searches should be run against the jrsoc stream or All Messages
+with an appropriate time range. Fields use double quotes for string values.
+
+NOTE: Graylog 5 requires string fields to be quoted.
+      Boolean-like fields (true/false) must be quoted: "true" not true.
+      Leading wildcards (*) are not supported in WildcardQuery.
+
+============================================================
+DEPLOYMENT / ORG FILTERING
+============================================================
+
+On a shared Graylog receiving from multiple jrSOCtriage instances,
+scope to one organization or security domain. Set deployment.org and
+deployment.security_domain in each instance's config (Config tab,
+Deployment card); they ship as jrsoc_org and jrsoc_security_domain on
+every record. Combine these with any search below to limit results.
+
+All alerts from one organization:
+  jrsoc_org:"acme-corp"
+
+All alerts from one security domain within an org:
+  jrsoc_org:"acme-corp" AND jrsoc_security_domain:"production"
+
+NOTIFY verdicts for one org (combine with a status search):
+  jrsoc_org:"acme-corp" AND gl2_llm_verdict:NOTIFY
+
+Records missing a deployment label (instances not yet configured;
+unset fields ship as "N/A"):
+  jrsoc_org:"N/A"
+
+============================================================
+PIPELINE STATUS SEARCHES
+============================================================
+
+All enriched alerts (shipped by jrSOCtriage, not yet triaged):
+  gl2_triage_complete:"false"
+
+All triaged alerts (reviewed by LLM):
+  gl2_triage_complete:"true"
+
+All NOTIFY verdicts:
+  gl2_llm_verdict:NOTIFY
+
+All NOTE verdicts (use as saved search for periodic review instead of email):
+  gl2_llm_verdict:NOTE
+
+All SUPPRESS verdicts:
+  gl2_llm_verdict:SUPPRESS
+
+All FAILED verdicts (pipeline could not reach the LLM — endpoint issue):
+  gl2_llm_verdict:FAILED
+
+Pipeline health check (count of FAILED in last hour — good candidate for
+a Graylog alert if threshold exceeded):
+  gl2_llm_verdict:FAILED AND gl2_llm_endpoint:pipeline
+
+High confidence NOTIFY:
+  gl2_llm_verdict:NOTIFY AND gl2_llm_confidence:HIGH
+
+Medium confidence NOTIFY:
+  gl2_llm_verdict:NOTIFY AND gl2_llm_confidence:MEDIUM
+
+Alerts with LLM prompt stored (for prompt review/testing):
+  _exists_:gl2_llm_prompt AND gl2_triage_complete:"true"
+
+Alerts with ntopng flow data:
+  _exists_:gl2_ntopng_flows
+
+Alerts with Graylog context logs:
+  _exists_:context_logs
+
+============================================================
+ESCALATION AND ENRICHMENT SEARCHES
+============================================================
+
+Alerts escalated by abuse score:
+  gl2_abuse_score:>50
+
+Alerts with external IPs (enriched):
+  _exists_:gl2_src_country
+
+Alerts from a specific country:
+  gl2_src_country:"Russia"
+
+Alerts from known scanner infrastructure (examples):
+  gl2_src_rdns:*shodan*
+  gl2_src_rdns:*censys*
+  gl2_src_rdns:*stretchoid*
+
+Alerts above hourly baseline:
+  gl2_baseline_note:*ABOVE HOURLY*
+
+Alerts above daily baseline:
+  gl2_baseline_note:*ABOVE DAILY*
+
+============================================================
+HOST-SPECIFIC SEARCHES
+============================================================
+
+All alerts for a specific host:
+  canonical_hostname:HOSTNAME
+
+All alerts involving a specific IP:
+  internal_ips:192.168.X.X
+  external_ips:X.X.X.X
+
+============================================================
+ALERT TYPE SEARCHES
+============================================================
+
+Suricata alerts only:
+  wazuh_groups:suricata
+
+Wazuh FIM/syscheck alerts:
+  wazuh_groups:syscheck
+
+Wazuh rootcheck alerts:
+  wazuh_groups:rootcheck
+
+Windows security alerts:
+  wazuh_groups:windows_security
+
+Authentication alerts:
+  wazuh_groups:authentication_success OR wazuh_groups:authentication_failed
+
+High severity alerts (level 10+):
+  level:>9
+
+============================================================
+MITRE ATT&CK SEARCHES
+============================================================
+
+Search by tactic:
+  gl2_mitre_tactics:Persistence
+  gl2_mitre_tactics:"Privilege Escalation"
+  gl2_mitre_tactics:Impact
+
+Search by technique ID:
+  gl2_mitre_ids:T1078
+  gl2_mitre_ids:T1098
+
+============================================================
+DEDUP KEY SEARCHES
+============================================================
+
+Find all instances of a specific rule on a host:
+  dedup_key:RULE_ID|HOSTNAME
+
+Find all alerts for a specific Wazuh rule:
+  wazuh_rule_id:RULE_ID
+
+
+============================================================
+ANONYMIZATION AUDIT SEARCHES
+============================================================
+
+All alerts sent to cloud LLM endpoints with anonymization:
+  gl2_anon:"true"
+
+All alerts sent to local LLM endpoints (not anonymized):
+  gl2_anon:"false" AND gl2_triage_complete:"true"
+
+Anonymized alerts by endpoint:
+  gl2_anon:"true" AND gl2_llm_endpoint:gemini-2.5-flash
+  gl2_anon:"true" AND gl2_llm_endpoint:gpt-4o
+
+All cloud-triaged NOTIFY verdicts (anonymized prompts):
+  gl2_anon:"true" AND gl2_llm_verdict:NOTIFY
+
+Compare local vs cloud verdict distribution:
+  gl2_anon:"false" AND gl2_llm_verdict:NOTIFY
+  gl2_anon:"true" AND gl2_llm_verdict:NOTIFY
+
+Verify anonymization is working — confirm no real
+hostnames/usernames appear in cloud-endpoint prompts:
+  gl2_anon:"true" AND _exists_:gl2_llm_prompt
+  (review gl2_llm_prompt field manually for any PII leakage)
+
+============================================================
+COMBINED SEARCHES (most useful for daily review)
+============================================================
+
+LLM triaged alerts in last hour:
+  gl2_triage_complete:"true"
+  (set time range to Last 1 hour)
+
+External threats to a specific host:
+  canonical_hostname:HOSTNAME AND gl2_triage_complete:"true"
+
+High abuse score alerts that went to LLM:
+  gl2_abuse_score:>50 AND gl2_triage_complete:"true"
+
+All NOTIFYs with reasoning:
+  gl2_llm_verdict:NOTIFY AND _exists_:gl2_llm_reasoning
+
+Alerts with both ntopng and LLM data:
+  _exists_:gl2_ntopng_flows AND gl2_triage_complete:"true"
+
+============================================================
+SAVED SEARCH RECOMMENDATIONS
+============================================================
+
+Consider saving these as named searches in Graylog for quick access:
+
+"LLM Review"         gl2_triage_complete:"true"
+                     Columns: timestamp, source, gl2_llm_verdict,
+                     gl2_llm_confidence, message, gl2_mitre_tactics
+
+"NOTIFY Alerts"      gl2_llm_verdict:NOTIFY
+                     Columns: timestamp, source, gl2_llm_verdict,
+                     gl2_llm_confidence, gl2_llm_summary, gl2_mitre_tactics
+
+"Notes Review"       gl2_llm_verdict:NOTE
+                     Columns: timestamp, source, gl2_llm_confidence,
+                     gl2_llm_summary, gl2_llm_reasoning
+                     Check periodically instead of using email for NOTEs
+
+"External Threats"   _exists_:gl2_src_country AND gl2_triage_complete:"true"
+                     Columns: timestamp, source, gl2_src_rdns,
+                     gl2_src_country, gl2_abuse_score, gl2_llm_verdict
+
+"DMZ Activity"       canonical_hostname:YOUR_DMZ_HOST
+                     Columns: timestamp, gl2_src_rdns, gl2_src_country,
+                     gl2_abuse_score, gl2_llm_verdict, message
+
+"Cloud Audit"        gl2_anon:"true"
+                     Columns: timestamp, source, gl2_llm_endpoint,
+                     gl2_llm_verdict, gl2_llm_confidence, gl2_anon
