@@ -1322,7 +1322,7 @@ HTML = """<!DOCTYPE html>
         </div>
         <div class="field">
           <label>Interface ID (ifid)</label>
-          <div class="hint">From ntopng UI, usually 1 or 2</div>
+          <div class="hint">The id ntopng assigns your monitored interface — often 0. Check ntopng's interfaces list; it can change after an ntopng upgrade or state reset.</div>
           <input type="number" id="src_ntopng_ifid" min="0">
         </div>
       </div>
@@ -2490,7 +2490,11 @@ function populateConfigFields(config) {
   const ntAuth = nt.auth || {};
   document.getElementById('src_ntopng_enabled').checked = nt.enabled ?? false;
   document.getElementById('src_ntopng_endpoint').value  = nt.endpoint || '';
-  document.getElementById('src_ntopng_ifid').value      = nt.ifid || 1;
+  // ifid 0 is a VALID interface id (a single-interface ntopng commonly
+  // registers as id 0). `||` treats 0 as falsy and would silently display a
+  // saved 0 as the default, and a subsequent save would then write that
+  // wrong value back to config. `??` only falls back on null/undefined.
+  document.getElementById('src_ntopng_ifid').value      = nt.ifid ?? 0;
   document.getElementById('src_ntopng_user').value      = ntAuth.username || '';
   document.getElementById('src_ntopng_pass').value      = ntAuth.password || '';
   document.getElementById('src_ntopng_verify_ssl').checked = nt.verify_ssl !== false;
@@ -2845,7 +2849,13 @@ async function saveConfig() {
       ...((config.sources || {}).ntopng || {}),
       enabled: document.getElementById('src_ntopng_enabled').checked,
       endpoint: document.getElementById('src_ntopng_endpoint').value,
-      ifid: parseInt(document.getElementById('src_ntopng_ifid').value || 1),
+      // ifid 0 is valid — do not use `||` (0 is falsy in JS and would be
+      // rewritten to the fallback). Empty field -> parseInt gives NaN, so
+      // fall back explicitly rather than writing NaN into config.
+      ifid: (() => {
+        const v = parseInt(document.getElementById('src_ntopng_ifid').value, 10);
+        return Number.isInteger(v) ? v : 0;
+      })(),
       verify_ssl: document.getElementById('src_ntopng_verify_ssl').checked,
       auth: {
         username: document.getElementById('src_ntopng_user').value,
@@ -5261,7 +5271,7 @@ def _default_config_template():
         "sources": {
             "wazuh": {"enabled": True, "alerts_file": "/mnt/appdata/jrsoctriage/alerts.json"},
             "zeek": {"enabled": True, "current_log_dir": "/opt/zeek/logs/current", "archive_log_dir": ""},
-            "ntopng": {"enabled": False, "endpoint": "http://127.0.0.1:3001", "ifid": 1,
+            "ntopng": {"enabled": False, "endpoint": "http://127.0.0.1:3001", "ifid": 0,
                        "verify_ssl": True,
                        "skip_networks": [],
                        "auth": {"username": "admin", "password": ""}},
