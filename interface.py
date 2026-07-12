@@ -1322,7 +1322,7 @@ HTML = """<!DOCTYPE html>
         </div>
         <div class="field">
           <label>Interface ID (ifid)</label>
-          <div class="hint">The id ntopng assigns your monitored interface — often 0. Check ntopng's interfaces list; it can change after an ntopng upgrade or state reset.</div>
+          <div class="hint">ntopng assigns this id by an interface's position in its own interface list, so the value depends on your ntopng config and can change after an upgrade, a config change, or a state reset. Read the current id from ntopng's interfaces list.</div>
           <input type="number" id="src_ntopng_ifid" min="0">
         </div>
       </div>
@@ -2490,8 +2490,8 @@ function populateConfigFields(config) {
   const ntAuth = nt.auth || {};
   document.getElementById('src_ntopng_enabled').checked = nt.enabled ?? false;
   document.getElementById('src_ntopng_endpoint').value  = nt.endpoint || '';
-  // ifid 0 is a VALID interface id (a single-interface ntopng commonly
-  // registers as id 0). `||` treats 0 as falsy and would silently display a
+  // ifid 0 is a VALID interface id — ntopng assigns ids by position in its
+  // own interface list, and 0 is an ordinary value. `||` treats 0 as falsy and would silently display a
   // saved 0 as the default, and a subsequent save would then write that
   // wrong value back to config. `??` only falls back on null/undefined.
   document.getElementById('src_ntopng_ifid').value      = nt.ifid ?? 0;
