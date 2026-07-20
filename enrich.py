@@ -25,7 +25,52 @@ import dns.resolver
 import dns.reversename
 import dns.exception
 
-import perf_diag
+try:
+    import perf_diag
+except ModuleNotFoundError:
+    # perf_diag is an optional internal diagnostic counter module and is not
+    # part of the distributed package. Its absence must never stop the
+    # pipeline, so fall back to a no-op stub with the same call surface.
+    # Stateless by design: safe under free-threading, no locks, no allocation
+    # on the per-alert path.
+    class _PerfDiagStub:
+        @staticmethod
+        def configure(_config=None):
+            return False
+
+        @staticmethod
+        def enabled():
+            return False
+
+        @staticmethod
+        def count(_name, _n=1):
+            pass
+
+        @staticmethod
+        def cache(_name, _outcome, _n=1):
+            pass
+
+        @staticmethod
+        def observe(_name, _value):
+            pass
+
+        @staticmethod
+        def stage_enter(_name):
+            return 0.0
+
+        @staticmethod
+        def stage_exit(_name, _start=None):
+            pass
+
+        @staticmethod
+        def snapshot_and_reset():
+            return {}
+
+        @staticmethod
+        def log_summary(_logger):
+            pass
+
+    perf_diag = _PerfDiagStub()
 
 logger = logging.getLogger(__name__)
 
