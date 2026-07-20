@@ -849,6 +849,49 @@ HTML = """<!DOCTYPE html>
   .panel { display: none; }
   .panel.active { display: block; }
 
+  /* Config sub-tabs — folder-style tabs seated on a baseline rule, pinned
+     under the 52px header. Boxed chrome so they unmistakably read as tabs;
+     the active tab opens into the content below it. */
+  .config-subnav {
+    display: flex;
+    gap: 6px;
+    position: sticky;
+    top: 52px;
+    z-index: 90;
+    background: var(--bg);
+    padding: 8px 0 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .config-subnav button {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    color: var(--textdim);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 7px 18px;
+    cursor: pointer;
+    border-radius: 5px 5px 0 0;
+    transition: all 0.15s;
+    white-space: nowrap;
+    position: relative;
+    top: 1px;
+  }
+  .config-subnav button:hover { color: var(--text); background: var(--bg3); }
+  .config-subnav button.active {
+    color: var(--green);
+    background: var(--bg3);
+    border-top: 2px solid var(--green);
+    border-bottom: 1px solid var(--bg3);
+  }
+  .config-subpanel { display: none; }
+  .config-subpanel.active { display: block; }
+  .config-subtab-prompt { color: var(--textdim); font-family: var(--mono); font-size: 13px; padding: 24px 0; }
+
   /* Section header */
   .section-header {
     display: flex;
@@ -889,6 +932,14 @@ HTML = """<!DOCTYPE html>
     padding-bottom: 8px;
     border-bottom: 1px solid var(--border);
     font-weight: bold;
+  }
+  .src-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--amber);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
   }
 
   .card-subhead {
@@ -1196,23 +1247,21 @@ HTML = """<!DOCTYPE html>
     <span class="section-desc">Core pipeline settings</span>
   </div>
 
-  <div class="card">
-    <div class="card-title">Deployment</div>
-    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
-      This is for deployment identity in Graylog.
-    </div>
-    <div class="grid2">
-      <div class="field">
-        <label>jrsoc_org</label>
-        <div class="hint">This is the name of the organization being monitored</div>
-        <input type="text" id="deploy_org">
-      </div>
-      <div class="field">
-        <label>jrsoc_security_domain</label>
-        <div class="hint">This is the part of the organization being monitored</div>
-        <input type="text" id="deploy_security_domain">
-      </div>
-    </div>
+  <!-- Config sub-tabs: hard separation — cards render only on explicit choice -->
+  <div class="config-subnav">
+    <button id="subtab-btn-src" onclick="showConfigSubTab('src', this)">Source &amp; Enrich</button>
+    <button id="subtab-btn-proc" onclick="showConfigSubTab('proc', this)">Processing, LLM &amp; Etc.</button>
+  </div>
+
+  <!-- Panel-level status: visible in the empty state (loadConfig error path) -->
+  <div id="status-bar-config" style="font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:3px;display:none;"></div>
+
+  <div id="config-subtab-prompt" class="config-subtab-prompt">Select a settings group above</div>
+
+  <div id="config-sub-src" class="config-subpanel">
+  <div class="section-header">
+    <span class="section-title">// Source &amp; Enrich</span>
+    <span class="section-desc">Core alert and data sources</span>
   </div>
 
   <div class="card">
@@ -1222,7 +1271,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="padding-top:8px">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Wazuh <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(alert source)</span></div>
+      <div class="src-title">Wazuh <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(alert source)</span></div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="src_wazuh_enabled"><span class="toggle-slider"></span></label>
         <label for="src_wazuh_enabled">Enabled</label>
@@ -1234,7 +1283,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Zeek <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(network flows)</span></div>
+      <div class="src-title">Zeek <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(network flows)</span></div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="src_zeek_enabled"><span class="toggle-slider"></span></label>
         <label for="src_zeek_enabled">Enabled</label>
@@ -1250,7 +1299,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Graylog <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(context logs)</span></div>
+      <div class="src-title">Graylog <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(context logs)</span></div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="src_graylog_enabled"><span class="toggle-slider"></span></label>
         <label for="src_graylog_enabled">Enabled</label>
@@ -1289,7 +1338,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Graylog Output <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(ship verdicts as GELF)</span></div>
+      <div class="src-title">Graylog Output <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(ship verdicts as GELF)</span></div>
       <div class="hint" style="margin-bottom:8px">Ships triaged alerts to Graylog as GELF UDP messages. Used for dashboards, search, and stream rules. The destination Graylog input must be a "GELF UDP" input (separate from the API endpoint above).</div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="out_graylog_enabled"><span class="toggle-slider"></span></label>
@@ -1310,7 +1359,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">ntopng <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(L7 active flows)</span></div>
+      <div class="src-title">ntopng <span style="color:var(--textdim);font-size:10px;text-transform:none;letter-spacing:0">(L7 active flows)</span></div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="src_ntopng_enabled"><span class="toggle-slider"></span></label>
         <label for="src_ntopng_enabled">Enabled</label>
@@ -1344,101 +1393,6 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <div class="card-title">Timezone</div>
-    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
-      Zeek logs in UTC. This is used to convert to local time for alert context windows.
-    </div>
-    <div class="grid2">
-      <div class="field">
-        <label>Local TZ Offset (hours from UTC)</label>
-        <div class="hint">e.g. -6 for CST, -5 for CDT, 0 for UTC</div>
-        <input type="number" id="tz_offset" step="1" min="-12" max="14">
-      </div>
-      <div class="field">
-        <label>Local TZ Name</label>
-        <div class="hint">Display label only. e.g. CST, CDT, EST</div>
-        <input type="text" id="tz_name" placeholder="CST">
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">Processing</div>
-    <div class="grid3">
-      <div class="field">
-        <label>Poll Interval (seconds)</label>
-        <div class="hint">How often to check for new alerts</div>
-        <input type="number" id="poll_interval" min="5" max="300">
-      </div>
-      <div class="field">
-        <label>Dedup Silence (seconds)</label>
-        <div class="hint">Suppress duplicate alerts for this long</div>
-        <input type="number" id="dedup_silence" min="0">
-      </div>
-      <div class="field">
-        <label>Max Batch Size</label>
-        <div class="hint">Max alerts to process per cycle</div>
-        <input type="number" id="max_batch" min="1" max="1000">
-      </div>
-    </div>
-    <div class="card-subhead">// Frequency Thresholds</div>
-    <div class="grid3">
-      <div class="field">
-        <label>Baseline Multiplier</label>
-        <div class="hint">Deviation multiplier for baseline alerts (e.g. 2.0 = 2x average)</div>
-        <input type="number" id="baseline_mult" min="1" max="10" step="0.1">
-      </div>
-      <div class="field">
-        <label>Min Baseline Days</label>
-        <div class="hint">Days of data needed before baseline is active</div>
-        <input type="number" id="min_baseline_days" min="1" max="30">
-      </div>
-      <div class="field">
-        <label>Escalation Multiplier</label>
-        <div class="hint">Deviation multiplier to force escalation</div>
-        <input type="number" id="escalation_mult" min="1" max="20" step="0.1">
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">Filtering</div>
-    <div class="grid2">
-      <div class="field">
-        <label>Min Rule Level</label>
-        <div class="hint">Wazuh alert levels 0-15. Alerts below this are ignored (unless escalated)</div>
-        <input type="number" id="min_rule_level" min="0" max="15">
-      </div>
-      <div class="field">
-        <label>Abuse Score Threshold</label>
-        <div class="hint">AbuseIPDB score above this triggers escalation regardless of rule level</div>
-        <input type="number" id="abuse_threshold" min="0" max="100">
-      </div>
-    </div>
-    <div class="toggle-row">
-      <label class="toggle"><input type="checkbox" id="escalate_first_seen"><span class="toggle-slider"></span></label>
-      <label for="escalate_first_seen">Escalate first-seen rules (new rule IDs on a host)</label>
-    </div>
-    <div class="toggle-row">
-      <label class="toggle"><input type="checkbox" id="frequency_escalation_enabled"><span class="toggle-slider"></span></label>
-      <label for="frequency_escalation_enabled">Escalate frequency anomalies (count > multiplier × daily baseline)</label>
-    </div>
-    <div class="field">
-      <label>First Seen Lookback (days)</label>
-      <div class="hint">How many days back to check for "first seen" rule detection</div>
-      <input type="number" id="first_seen_days" min="1" max="90" style="max-width:160px">
-    </div>
-    <div class="field" style="margin-top:12px">
-      <label>Always Include Networks <span style="color:var(--textdim);font-size:10px;font-weight:400">(one CIDR per line, always escalates alerts involving these ranges)</span></label>
-      <textarea id="always_include_networks" rows="3" style="width:100%;font-family:var(--mono-read);font-size:13px;line-height:1.5;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;resize:vertical"></textarea>
-    </div>
-    <div class="field" style="margin-top:8px">
-      <label>Always Include Hosts <span style="color:var(--textdim);font-size:10px;font-weight:400">(one hostname per line)</span></label>
-      <textarea id="always_include_hosts" rows="3" style="width:100%;font-family:var(--mono-read);font-size:13px;line-height:1.5;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;resize:vertical"></textarea>
-    </div>
-  </div>
-
-  <div class="card">
     <div class="card-title">Enrichment</div>
     <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
       External data sources that enrich alerts before the LLM sees them.
@@ -1452,13 +1406,9 @@ HTML = """<!DOCTYPE html>
       <label class="toggle"><input type="checkbox" id="enr_network_lookup"><span class="toggle-slider"></span></label>
       <label for="enr_network_lookup">Network CIDR lookup</label>
     </div>
-    <div class="toggle-row">
-      <label class="toggle"><input type="checkbox" id="enr_full_json"><span class="toggle-slider"></span></label>
-      <label for="enr_full_json">Include full alert JSON in prompt</label>
-    </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">GeoIP (ip-api.com)</div>
+      <div class="src-title">GeoIP (ip-api.com)</div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="geo_enabled"><span class="toggle-slider"></span></label>
         <label for="geo_enabled">Enabled</label>
@@ -1470,7 +1420,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">WHOIS</div>
+      <div class="src-title">WHOIS</div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="whois_enabled"><span class="toggle-slider"></span></label>
         <label for="whois_enabled">Enabled</label>
@@ -1482,7 +1432,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Reverse DNS</div>
+      <div class="src-title">Reverse DNS</div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="rdns_enabled"><span class="toggle-slider"></span></label>
         <label for="rdns_enabled">Enabled</label>
@@ -1494,7 +1444,7 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-      <div style="font-weight:500;color:var(--textdim);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">AbuseIPDB</div>
+      <div class="src-title">AbuseIPDB</div>
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="abuse_enabled"><span class="toggle-slider"></span></label>
         <label for="abuse_enabled">Enabled</label>
@@ -1515,40 +1465,96 @@ HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
-  </div>
 
-  <div class="card">
-    <div class="card-title">LLM Endpoints</div>
-    <div class="field" style="margin-bottom:16px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:4px">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px">
-        <input type="checkbox" id="llm_enabled" style="cursor:pointer">
-        <span>Enable LLM triage</span>
-      </label>
-      <div style="color:var(--textdim);font-size:11px;line-height:1.5;margin-left:24px">
-        When enabled (default), every alert that passes filtering goes to a configured LLM endpoint for verdict generation, and triaged results are emailed if confidence thresholds are met. When disabled, the pipeline runs in <strong>enrichment-only mode</strong>: alerts are still enriched (host inventory, IP reputation, geo, MITRE, baseline) and shipped to Graylog with all enrichment fields, but no LLM call is made and no email is sent. Useful for evaluation phases, deployments where a separate SIEM or SOAR consumes the enriched alerts, or privacy-sensitive environments where even local LLM inference is too much. Graylog stream rules that filter on <code>_gl2_triage_complete:true</code> will not match in this mode.
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="src-title">CISA KEV (Known Exploited Vulnerabilities)</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="kev_enabled"><span class="toggle-slider"></span></label>
+        <label for="kev_enabled">Enabled</label>
       </div>
+      <div class="hint">Matches CVEs found in alerts against CISA's KEV catalog. Free, no API key, no rate limit. Catalog fetched from cisa.gov at most once per 24h, and only when an alert actually contains a CVE. Results add a KEV STATUS block (with interpretation guidance) to the LLM prompt and a gl2_kev_listed field to Graylog.</div>
     </div>
-    <div class="grid2" style="margin-bottom:16px">
-      <div class="field">
-        <label>Global Max Workers <span style="color:var(--textdim);font-size:10px;font-weight:400;text-transform:none;letter-spacing:0">(Processing)</span></label>
-        <div class="hint">Concurrent pipeline workers across all stages — enrichment, database writes, LLM calls, and GELF shipping, not just the LLM. 1 = serial. Each worker carries one alert through the whole pipeline. You can run more workers than you have LLM endpoints/instances (extra workers raise burst capacity for the non-LLM stages and queue for an LLM slot when one is busy), but do not configure more concurrent LLM instances than workers — an LLM instance with no worker to feed it does nothing.</div>
-        <input type="number" id="max_workers" min="1" max="32" style="max-width:120px">
+
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="src-title">GreyNoise</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="greynoise_enabled"><span class="toggle-slider"></span></label>
+        <label for="greynoise_enabled">Enabled</label>
       </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="greynoise_skip_private"><span class="toggle-slider"></span></label>
+        <label for="greynoise_skip_private">Skip private IPs</label>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="greynoise_rate_limit_warnings"><span class="toggle-slider"></span></label>
+        <label for="greynoise_rate_limit_warnings">Rate-limit warnings</label>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div class="field">
+          <label>API Key (optional)</label>
+          <input type="password" id="greynoise_api_key" placeholder="commercial or trial key">
+        </div>
+      </div>
+      <div class="hint">Classifies external source IPs: known internet-wide mass scanners and background noise (opportunistic activity) vs IPs not seen scanning the internet (activity plausibly targeted at this network). Works without a key at very low volume (~10 lookups/day); a commercial or trial key is needed for real deployments. Results add a GREYNOISE block (with interpretation guidance) to the LLM prompt and a gl2_greynoise_class field to Graylog. Rate-limit warnings: log an operator warning when a lookup is rate-limited — leave on when running with a key (a 429 during normal operation can signal elevated external-IP volume); turn off when running keyless, where rate-limiting is routine. Rate-limited lookups are annotated in the record either way.</div>
     </div>
-    <div id="endpoints-container"></div>
-    <div class="btn-row" style="margin-top:4px;margin-bottom:16px">
-      <button class="btn btn-dim" onclick="addEndpoint('ollama')">+ Ollama</button>
-      <button class="btn btn-dim" onclick="addEndpoint('gemini')">+ Gemini</button>
-      <button class="btn btn-dim" onclick="addEndpoint('llamacpp')">+ llama.cpp</button>
-      <button class="btn btn-dim" onclick="addEndpoint('openai')">+ OpenAI</button>
-      <button class="btn btn-dim" onclick="addEndpoint('anthropic')">+ Anthropic</button>
+
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="src-title">EPSS</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="epss_enabled"><span class="toggle-slider"></span></label>
+        <label for="epss_enabled">Enabled</label>
+      </div>
+      <div class="hint">Scores CVEs found in alerts with FIRST.org's Exploit Prediction Scoring System: the modeled probability (updated daily) that each CVE will be exploited in the wild within 30 days, plus its percentile rank. Free, no API key. Only fires on CVE-bearing alerts — one batched lookup per alert covering all its CVEs, cached 24h per CVE. Complements CISA KEV: KEV confirms past exploitation, EPSS estimates forward likelihood. Results add an EPSS SCORES block (with interpretation guidance) to the LLM prompt and a numeric gl2_epss_max field to Graylog (searchable with range queries, e.g. gl2_epss_max:&gt;0.5).</div>
     </div>
-    <div class="field" style="margin-top:4px">
-      <label>Strategy</label>
-      <select id="llm_strategy" style="max-width:200px">
-        <option value="round_robin">Round Robin</option>
-        <option value="fallback">Fallback (priority order)</option>
-      </select>
+
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="src-title">VirusTotal</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="vt_enabled"><span class="toggle-slider"></span></label>
+        <label for="vt_enabled">Enabled</label>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="vt_skip_private"><span class="toggle-slider"></span></label>
+        <label for="vt_skip_private">Skip private IPs</label>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="vt_rate_limit_warnings"><span class="toggle-slider"></span></label>
+        <label for="vt_rate_limit_warnings">Rate-limit warnings</label>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div class="field">
+          <label>API Key (required)</label>
+          <input type="password" id="vt_api_key" placeholder="VirusTotal API key">
+        </div>
+        <div class="field">
+          <label>Per-alert lookup cap</label>
+          <input type="number" id="vt_per_alert_cap" min="1" step="1" placeholder="4">
+        </div>
+      </div>
+      <div class="hint">Checks file hashes (from Wazuh FIM/syscheck alerts and hash-bearing rules) and external source IPs against VirusTotal's ~76 antivirus engines. Hash results are the headline: "config file changed" is noise, but "changed and the new content is 65/74 known malware" — or "the content just overwritten was" — is a verdict. Current-file hashes are checked first; previous-content hashes use remaining budget. Hash results cached 24h, IPs 30min. Results add a VIRUSTOTAL block (with interpretation guidance) to the LLM prompt and a numeric gl2_vt_malicious field to Graylog (range-searchable, e.g. gl2_vt_malicious:&gt;5). Per-alert lookup cap: with a free key leave this at 4 — free VirusTotal keys are limited to 4 lookups/min and 500/day, and are licensed for non-commercial use only (commercial deployments require a VT premium key, which may warrant a higher cap). Rate-limit warnings: off by default — quota bounces are routine on free keys; rate-limited lookups are annotated RATE_LIMITED in the record either way.</div>
+    </div>
+
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="src-title">AlienVault OTX</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="otx_enabled"><span class="toggle-slider"></span></label>
+        <label for="otx_enabled">Enabled</label>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="otx_skip_private"><span class="toggle-slider"></span></label>
+        <label for="otx_skip_private">Skip private IPs</label>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="otx_rate_limit_warnings"><span class="toggle-slider"></span></label>
+        <label for="otx_rate_limit_warnings">Rate-limit warnings</label>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div class="field">
+          <label>API Key (optional)</label>
+          <input type="password" id="otx_api_key" placeholder="raises rate ceiling">
+        </div>
+      </div>
+      <div class="hint">Checks file hashes and external source IPs against AlienVault OTX community pulses — analyst-contributed IOC collections for campaigns, malware families, and attacker infrastructure. Adds the fourth intelligence axis: engine detections say WHAT a file is; pulses say WHO has reported it and in connection with what. Renders pulse count, latest-reference date, and top pulse names — note that pulse names are unvetted community labels (training-lab and auto-generated pulses are common), so treat them as leads, not attribution. Free with an OTX account; works keyless at a lower rate ceiling. OTX does not confirm key validity on lookups — a mistyped key silently behaves as keyless; verify your key at otx.alienvault.com if in doubt. Hash results cached 24h, IPs 30min. Results add an OTX COMMUNITY INTELLIGENCE block (with interpretation guidance) to the LLM prompt and a numeric gl2_otx_pulses field to Graylog (range-searchable, e.g. gl2_otx_pulses:&gt;0).</div>
     </div>
   </div>
 
@@ -1696,6 +1702,180 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <div class="card-title">Database</div>
+    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
+      When OFF, jrSOCtriage runs fully stateless: no DB writes (no alert history or escalation log) and all DB reads fail open (no baseline frequency context; rule rate-limiting and maintenance-mode suppression disabled). In-memory dedup is UNAFFECTED — core noise suppression still works. Because there is no write path, DB-related failure modes are removed entirely. Recommended for high-alert-volume deployments that prefer to remove DB write pressure as a reliability variable. Expect higher LLM call volume (rate-limiting fails open). Leave ON for full stateful features.
+    </div>
+    <div class="toggle-row">
+      <label class="toggle"><input type="checkbox" id="db_enabled"><span class="toggle-slider"></span></label>
+      <label for="db_enabled">Database enabled <span style="color:var(--textdim);font-size:10px;font-weight:400">(off = stateless, corruption-proof, higher LLM volume)</span></label>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-green" onclick="saveConfig()">Save Config</button>
+    <button class="btn btn-dim" onclick="loadDefaults()">Load Defaults</button>
+    <div id="status-bar-config-src" style="font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:3px;display:none;"></div>
+    <div class="hint" style="color:var(--textdim);font-size:11px;align-self:center">Save Config writes the whole config.json &mdash; fields from both sub-tabs are saved together.</div>
+  </div>
+  </div>
+
+  <div id="config-sub-proc" class="config-subpanel">
+  <div class="section-header">
+    <span class="section-title">// Processing, LLM &amp; Etc.</span>
+    <span class="section-desc">Alert processing, filtering, analysis, and logging</span>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Deployment</div>
+    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
+      This is for deployment identity in Graylog.
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label>jrsoc_org</label>
+        <div class="hint">This is the name of the organization being monitored</div>
+        <input type="text" id="deploy_org">
+      </div>
+      <div class="field">
+        <label>jrsoc_security_domain</label>
+        <div class="hint">This is the part of the organization being monitored</div>
+        <input type="text" id="deploy_security_domain">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Timezone</div>
+    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
+      Zeek logs in UTC. This is used to convert to local time for alert context windows.
+    </div>
+    <div class="grid2">
+      <div class="field">
+        <label>Local TZ Offset (hours from UTC)</label>
+        <div class="hint">e.g. -6 for CST, -5 for CDT, 0 for UTC</div>
+        <input type="number" id="tz_offset" step="1" min="-12" max="14">
+      </div>
+      <div class="field">
+        <label>Local TZ Name</label>
+        <div class="hint">Display label only. e.g. CST, CDT, EST</div>
+        <input type="text" id="tz_name" placeholder="CST">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Processing</div>
+    <div class="grid3">
+      <div class="field">
+        <label>Poll Interval (seconds)</label>
+        <div class="hint">How often to check for new alerts</div>
+        <input type="number" id="poll_interval" min="5" max="300">
+      </div>
+      <div class="field">
+        <label>Dedup Silence (seconds)</label>
+        <div class="hint">Suppress duplicate alerts for this long</div>
+        <input type="number" id="dedup_silence" min="0">
+      </div>
+      <div class="field">
+        <label>Max Batch Size</label>
+        <div class="hint">Max alerts to process per cycle</div>
+        <input type="number" id="max_batch" min="1" max="1000">
+      </div>
+    </div>
+    <div class="card-subhead">// Frequency Thresholds</div>
+    <div class="grid3">
+      <div class="field">
+        <label>Baseline Multiplier</label>
+        <div class="hint">Deviation multiplier for baseline alerts (e.g. 2.0 = 2x average)</div>
+        <input type="number" id="baseline_mult" min="1" max="10" step="0.1">
+      </div>
+      <div class="field">
+        <label>Min Baseline Days</label>
+        <div class="hint">Days of data needed before baseline is active</div>
+        <input type="number" id="min_baseline_days" min="0" max="365">
+      </div>
+      <div class="field">
+        <label>Escalation Multiplier</label>
+        <div class="hint">Deviation multiplier to force escalation</div>
+        <input type="number" id="escalation_mult" min="1" max="20" step="0.1">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Filtering</div>
+    <div class="grid2">
+      <div class="field">
+        <label>Min Rule Level</label>
+        <div class="hint">Wazuh alert levels 0-15. Alerts below this are ignored (unless escalated)</div>
+        <input type="number" id="min_rule_level" min="0" max="15">
+      </div>
+      <div class="field">
+        <label>Abuse Score Threshold</label>
+        <div class="hint">AbuseIPDB score above this triggers escalation regardless of rule level</div>
+        <input type="number" id="abuse_threshold" min="0" max="100">
+      </div>
+    </div>
+    <div class="toggle-row">
+      <label class="toggle"><input type="checkbox" id="escalate_first_seen"><span class="toggle-slider"></span></label>
+      <label for="escalate_first_seen">Escalate first-seen rules (new rule IDs on a host)</label>
+    </div>
+    <div class="toggle-row">
+      <label class="toggle"><input type="checkbox" id="frequency_escalation_enabled"><span class="toggle-slider"></span></label>
+      <label for="frequency_escalation_enabled">Escalate frequency anomalies (count > multiplier × daily baseline)</label>
+    </div>
+    <div class="field">
+      <label>First Seen Lookback (days)</label>
+      <div class="hint">How many days back to check for "first seen" rule detection</div>
+      <input type="number" id="first_seen_days" min="0" max="365" style="max-width:160px">
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label>Always Include Networks <span style="color:var(--textdim);font-size:10px;font-weight:400">(one CIDR per line, always escalates alerts involving these ranges)</span></label>
+      <textarea id="always_include_networks" rows="3" style="width:100%;font-family:var(--mono-read);font-size:13px;line-height:1.5;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;resize:vertical"></textarea>
+    </div>
+    <div class="field" style="margin-top:8px">
+      <label>Always Include Hosts <span style="color:var(--textdim);font-size:10px;font-weight:400">(one hostname per line)</span></label>
+      <textarea id="always_include_hosts" rows="3" style="width:100%;font-family:var(--mono-read);font-size:13px;line-height:1.5;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;resize:vertical"></textarea>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">LLM Endpoints</div>
+    <div class="field" style="margin-bottom:16px;padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:4px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px">
+        <input type="checkbox" id="llm_enabled" style="cursor:pointer">
+        <span>Enable LLM triage</span>
+      </label>
+      <div style="color:var(--textdim);font-size:11px;line-height:1.5;margin-left:24px">
+        When enabled (default), every alert that passes filtering goes to a configured LLM endpoint for verdict generation, and triaged results are emailed if confidence thresholds are met. When disabled, the pipeline runs in <strong>enrichment-only mode</strong>: alerts are still enriched (host inventory, IP reputation, geo, MITRE, baseline) and shipped to Graylog with all enrichment fields, but no LLM call is made and no email is sent. Useful for evaluation phases, deployments where a separate SIEM or SOAR consumes the enriched alerts, or privacy-sensitive environments where even local LLM inference is too much. Graylog stream rules that filter on <code>_gl2_triage_complete:true</code> will not match in this mode.
+      </div>
+    </div>
+    <div class="grid2" style="margin-bottom:16px">
+      <div class="field">
+        <label>Global Max Workers <span style="color:var(--textdim);font-size:10px;font-weight:400;text-transform:none;letter-spacing:0">(Processing)</span></label>
+        <div class="hint">Concurrent pipeline workers across all stages — enrichment, database writes, LLM calls, and GELF shipping, not just the LLM. 1 = serial. Each worker carries one alert through the whole pipeline. You can run more workers than you have LLM endpoints/instances (extra workers raise burst capacity for the non-LLM stages and queue for an LLM slot when one is busy), but do not configure more concurrent LLM instances than workers — an LLM instance with no worker to feed it does nothing.</div>
+        <input type="number" id="max_workers" min="1" max="32" style="max-width:120px">
+      </div>
+    </div>
+    <div id="endpoints-container"></div>
+    <div class="btn-row" style="margin-top:4px;margin-bottom:16px">
+      <button class="btn btn-dim" onclick="addEndpoint('ollama')">+ Ollama</button>
+      <button class="btn btn-dim" onclick="addEndpoint('gemini')">+ Gemini</button>
+      <button class="btn btn-dim" onclick="addEndpoint('llamacpp')">+ llama.cpp</button>
+      <button class="btn btn-dim" onclick="addEndpoint('openai')">+ OpenAI</button>
+      <button class="btn btn-dim" onclick="addEndpoint('anthropic')">+ Anthropic</button>
+    </div>
+    <div class="field" style="margin-top:4px">
+      <label>Strategy</label>
+      <select id="llm_strategy" style="max-width:200px">
+        <option value="round_robin">Round Robin</option>
+        <option value="fallback">Fallback (priority order)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-title">Logging</div>
     <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
       Controls what jrSOCtriage logs and ships to Graylog.
@@ -1733,21 +1913,12 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-title">Database</div>
-    <div class="hint" style="margin-bottom:12px;color:var(--textdim)">
-      When OFF, jrSOCtriage runs fully stateless: no DB writes (no alert history or escalation log) and all DB reads fail open (no baseline frequency context; rule rate-limiting and maintenance-mode suppression disabled). In-memory dedup is UNAFFECTED — core noise suppression still works. Because there is no write path, DB-related failure modes are removed entirely. Recommended for high-alert-volume deployments that prefer to remove DB write pressure as a reliability variable. Expect higher LLM call volume (rate-limiting fails open). Leave ON for full stateful features.
-    </div>
-    <div class="toggle-row">
-      <label class="toggle"><input type="checkbox" id="db_enabled"><span class="toggle-slider"></span></label>
-      <label for="db_enabled">Database enabled <span style="color:var(--textdim);font-size:10px;font-weight:400">(off = stateless, corruption-proof, higher LLM volume)</span></label>
-    </div>
-  </div>
-
   <div class="btn-row">
     <button class="btn btn-green" onclick="saveConfig()">Save Config</button>
     <button class="btn btn-dim" onclick="loadDefaults()">Load Defaults</button>
-    <div id="status-bar-config" style="font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:3px;display:none;"></div>
+    <div id="status-bar-config-proc" style="font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:3px;display:none;"></div>
+    <div class="hint" style="color:var(--textdim);font-size:11px;align-self:center">Save Config writes the whole config.json &mdash; fields from both sub-tabs are saved together.</div>
+  </div>
   </div>
 </div>
 
@@ -2362,6 +2533,8 @@ function showPanel(name, btn) {
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
+  // Hard separation: every entry to Config starts with no sub-tab selected
+  if (name === 'config') resetConfigSubTabs();
   if (name === 'config' && !config.processing) loadConfig();
 authFetch('/api/auth/me').then(r => r.json()).then(d => { currentUser = d.username || ''; }).catch(() => {});
   if (name === 'hosts' && !hosts.hosts) loadHosts();
@@ -2386,6 +2559,37 @@ authFetch('/api/auth/me').then(r => r.json()).then(d => { currentUser = d.userna
   const scrollBtns = document.getElementById('scroll-btns');
   if (scrollBtns) scrollBtns.style.display = scrollPanels.includes(name) ? 'flex' : 'none';
   window.scrollTo({top: 0, behavior: 'instant'});
+}
+
+// ---------------------------------------------------------------------------
+// Config sub-tabs — hard separation: cards render only on explicit choice.
+// This interaction pattern is the model for the future multi-tenant selector.
+// ---------------------------------------------------------------------------
+let activeConfigSubTab = null;
+
+function showConfigSubTab(name, btn) {
+  activeConfigSubTab = name;
+  document.getElementById('config-sub-src').classList.toggle('active', name === 'src');
+  document.getElementById('config-sub-proc').classList.toggle('active', name === 'proc');
+  document.getElementById('subtab-btn-src').classList.toggle('active', name === 'src');
+  document.getElementById('subtab-btn-proc').classList.toggle('active', name === 'proc');
+  document.getElementById('config-subtab-prompt').style.display = 'none';
+}
+
+function resetConfigSubTabs() {
+  activeConfigSubTab = null;
+  ['config-sub-src', 'config-sub-proc'].forEach(id => document.getElementById(id).classList.remove('active'));
+  ['subtab-btn-src', 'subtab-btn-proc'].forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById('config-subtab-prompt').style.display = 'block';
+}
+
+// Config status messages route to the ACTIVE sub-tab's bar (each sub-panel
+// carries its own, since duplicate IDs are invalid). Falls back to the
+// panel-level bar when no sub-tab is selected.
+function activeConfigStatusId() {
+  if (activeConfigSubTab === 'src') return 'status-bar-config-src';
+  if (activeConfigSubTab === 'proc') return 'status-bar-config-proc';
+  return 'status-bar-config';
 }
 
 // ---------------------------------------------------------------------------
@@ -2475,8 +2679,8 @@ function populateConfigFields(config) {
   document.getElementById('src_graylog_enabled').checked    = gl.enabled || false;
   document.getElementById('src_graylog_verify_ssl').checked = gl.verify_ssl !== false;
   document.getElementById('src_graylog_endpoint').value     = gl.endpoint || '';
-  document.getElementById('src_graylog_window').value       = gl.context_window_minutes || 0.5;
-  document.getElementById('src_graylog_max').value          = gl.max_results || 100;
+  document.getElementById('src_graylog_window').value       = gl.context_window_minutes ?? 0.5;
+  document.getElementById('src_graylog_max').value          = gl.max_results ?? 100;
   document.getElementById('src_graylog_user').value         = glAuth.username || '';
   document.getElementById('src_graylog_pass').value         = glAuth.password || '';
 
@@ -2484,7 +2688,7 @@ function populateConfigFields(config) {
   const outGl = (config.output || {}).graylog || {};
   document.getElementById('out_graylog_enabled').checked = outGl.enabled ?? false;
   document.getElementById('out_graylog_host').value      = outGl.host || '';
-  document.getElementById('out_graylog_port').value      = outGl.port || 12201;
+  document.getElementById('out_graylog_port').value      = outGl.port ?? 12201;
 
   const nt = src.ntopng || {};
   const ntAuth = nt.auth || {};
@@ -2521,7 +2725,6 @@ function populateConfigFields(config) {
   const enr = config.enrichment || {};
   document.getElementById('enr_host_lookup').checked    = enr.enable_host_lookup !== false;
   document.getElementById('enr_network_lookup').checked = enr.enable_network_lookup !== false;
-  document.getElementById('enr_full_json').checked      = enr.include_full_json !== false;
   const geo = enr.geo_ip || {};
   document.getElementById('geo_enabled').checked        = geo.enabled !== false;
   document.getElementById('geo_skip_private').checked   = geo.skip_private !== false;
@@ -2536,6 +2739,28 @@ function populateConfigFields(config) {
   document.getElementById('abuse_skip_private').checked  = abuse.skip_private !== false;
   document.getElementById('abuse_api_key').value         = abuse.api_key || '';
   document.getElementById('abuse_annotate_threshold').value = abuse.score_threshold ?? 25;
+  const kev = enr.cisa_kev || {};
+  document.getElementById('kev_enabled').checked          = kev.enabled || false;
+  const gn = enr.greynoise || {};
+  document.getElementById('greynoise_enabled').checked             = gn.enabled || false;
+  document.getElementById('greynoise_skip_private').checked        = gn.skip_private !== false;
+  document.getElementById('greynoise_rate_limit_warnings').checked = gn.rate_limit_warnings !== false;
+  document.getElementById('greynoise_api_key').value               = gn.api_key || '';
+  const epss = enr.epss || {};
+  document.getElementById('epss_enabled').checked         = epss.enabled || false;
+  const vt = enr.virustotal || {};
+  document.getElementById('vt_enabled').checked             = vt.enabled || false;
+  document.getElementById('vt_skip_private').checked        = vt.skip_private !== false;
+  document.getElementById('vt_rate_limit_warnings').checked = vt.rate_limit_warnings === true;
+  document.getElementById('vt_api_key').value               = vt.api_key || '';
+  // ?? not || (the ifid lesson): a cap of small integers must load
+  // faithfully; || would be safe here only by accident of min="1".
+  document.getElementById('vt_per_alert_cap').value         = vt.per_alert_cap ?? 4;
+  const otx = enr.otx || {};
+  document.getElementById('otx_enabled').checked             = otx.enabled || false;
+  document.getElementById('otx_skip_private').checked        = otx.skip_private !== false;
+  document.getElementById('otx_rate_limit_warnings').checked = otx.rate_limit_warnings === true;
+  document.getElementById('otx_api_key').value               = otx.api_key || '';
 
   const pc = config.prompt_customization || {};
   document.getElementById('prompt_sensor_context').value = (pc.sensor_context ?? []).join('\\n');
@@ -2642,16 +2867,16 @@ function renderEndpoints(endpoints) {
       <div class="grid3">
         <div class="field">
           <label>Priority</label>
-          <input type="number" id="ep_priority_${i}" value="${escapeHtml(ep.priority || i+1)}" min="1" max="10">
+          <input type="number" id="ep_priority_${i}" value="${escapeHtml(ep.priority ?? i+1)}" min="1" max="10">
         </div>
         <div class="field">
           <label>Timeout (seconds)</label>
-          <input type="number" id="ep_timeout_${i}" value="${escapeHtml(ep.timeout_seconds || 60)}" min="5" max="300">
+          <input type="number" id="ep_timeout_${i}" value="${escapeHtml(ep.timeout_seconds ?? 60)}" min="5" max="300">
         </div>
         <div class="field">
           <label>Max Concurrent</label>
           <div class="hint" style="font-size:10px">API rate limit throttle</div>
-          <input type="number" id="ep_concurrent_${i}" value="${escapeHtml(ep.max_concurrent || 1)}" min="1" max="20">
+          <input type="number" id="ep_concurrent_${i}" value="${escapeHtml(ep.max_concurrent ?? 1)}" min="1" max="20">
         </div>
       </div>
       <div class="toggle-row">
@@ -2677,13 +2902,13 @@ async function generatePaths() {
   document.getElementById('path_ipaliases').value = paths.ip_aliases_file ?? '';
   document.getElementById('path_position').value = paths.position_file ?? '';
   document.getElementById('path_log').value = paths.log_file ?? '';
-  showStatus('[OK] Paths generated - click Save Config to apply', 'info', 'status-bar-config');
+  showStatus('[OK] Paths generated - click Save Config to apply', 'info', activeConfigStatusId());
 }
 
 function clearPaths() {
   ['path_hosts','path_rules','path_db','path_users','path_domain','path_anon','path_ipaliases','path_position','path_log']
     .forEach(id => document.getElementById(id).value = '');
-  showStatus('[OK] Paths cleared', 'info', 'status-bar-config');
+  showStatus('[OK] Paths cleared', 'info', activeConfigStatusId());
 }
 
 function loadPathFields(paths, logging) {
@@ -2702,11 +2927,11 @@ function loadPathFields(paths, logging) {
 }
 
 async function loadDefaults() {
-  if (!confirm('Load default config template? This will populate all fields with defaults but will NOT save until you click Save Config.')) return;
+  if (!confirm('Load default config template? This resets the ENTIRE config.json to defaults - the fields on BOTH sub-tabs, AND the Wazuh API settings shown on the Hosts tab. The defaults are generic placeholders; many settings (endpoints, paths, keys, email) will not work until edited for your environment. Nothing is written until you click Save Config.')) return;
   const res = await authFetch('/api/config/default');
   config = await res.json();
   populateConfigFields(config);
-  showStatus('[OK] Defaults loaded - review and click Save Config', 'info', 'status-bar-config');
+  showStatus('[OK] Defaults loaded - review and click Save Config', 'info', activeConfigStatusId());
 }
 
 async function saveConfig() {
@@ -2907,7 +3132,6 @@ async function saveConfig() {
     ...(config.enrichment || {}),
     enable_host_lookup:    document.getElementById('enr_host_lookup').checked,
     enable_network_lookup: document.getElementById('enr_network_lookup').checked,
-    include_full_json:     document.getElementById('enr_full_json').checked,
     geo_ip: {
       ...((config.enrichment || {}).geo_ip || {}),
       enabled:      document.getElementById('geo_enabled').checked,
@@ -2930,11 +3154,44 @@ async function saveConfig() {
       api_key:         document.getElementById('abuse_api_key').value,
       score_threshold: parseInt(document.getElementById('abuse_annotate_threshold').value || 25),
     },
+    cisa_kev: {
+      ...((config.enrichment || {}).cisa_kev || {}),
+      enabled: document.getElementById('kev_enabled').checked,
+    },
+    greynoise: {
+      ...((config.enrichment || {}).greynoise || {}),
+      enabled:             document.getElementById('greynoise_enabled').checked,
+      skip_private:        document.getElementById('greynoise_skip_private').checked,
+      api_key:             document.getElementById('greynoise_api_key').value,
+      rate_limit_warnings: document.getElementById('greynoise_rate_limit_warnings').checked,
+    },
+    epss: {
+      ...((config.enrichment || {}).epss || {}),
+      enabled: document.getElementById('epss_enabled').checked,
+    },
+    virustotal: {
+      ...((config.enrichment || {}).virustotal || {}),
+      enabled:             document.getElementById('vt_enabled').checked,
+      skip_private:        document.getElementById('vt_skip_private').checked,
+      api_key:             document.getElementById('vt_api_key').value,
+      rate_limit_warnings: document.getElementById('vt_rate_limit_warnings').checked,
+      per_alert_cap:       (() => {
+        const v = parseInt(document.getElementById('vt_per_alert_cap').value, 10);
+        return (Number.isInteger(v) && v >= 1) ? v : 4;
+      })(),
+    },
+    otx: {
+      ...((config.enrichment || {}).otx || {}),
+      enabled:             document.getElementById('otx_enabled').checked,
+      skip_private:        document.getElementById('otx_skip_private').checked,
+      api_key:             document.getElementById('otx_api_key').value,
+      rate_limit_warnings: document.getElementById('otx_rate_limit_warnings').checked,
+    },
   };
 
   const res = await authFetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(config) });
   const data = await res.json();
-  showStatus(data.ok ? '[OK] Saved' : '[ERR] ' + data.error, data.ok ? 'ok' : 'err', 'status-bar-config');
+  showStatus(data.ok ? '[OK] Saved' : '[ERR] ' + data.error, data.ok ? 'ok' : 'err', activeConfigStatusId());
 }
 
 // ---------------------------------------------------------------------------
@@ -5293,11 +5550,16 @@ def _default_config_template():
             "always_include": {"networks": [], "hosts": []}
         },
         "enrichment": {
-            "enable_host_lookup": True, "enable_network_lookup": True, "include_full_json": True,
+            "enable_host_lookup": True, "enable_network_lookup": True,
             "geo_ip": {"enabled": True, "provider": "ip-api.com", "skip_private": True},
             "whois": {"enabled": True, "skip_private": True},
             "rdns": {"enabled": True, "skip_private": False},
-            "abuseipdb": {"enabled": False, "api_key": "", "score_threshold": 25, "skip_private": True}
+            "abuseipdb": {"enabled": False, "api_key": "", "score_threshold": 25, "skip_private": True},
+            "cisa_kev": {"enabled": False},
+            "greynoise": {"enabled": False, "api_key": "", "skip_private": True, "rate_limit_warnings": True},
+            "epss": {"enabled": False},
+            "virustotal": {"enabled": False, "api_key": "", "per_alert_cap": 4, "skip_private": True, "rate_limit_warnings": False},
+            "otx": {"enabled": False, "api_key": "", "skip_private": True, "rate_limit_warnings": False}
         },
         "llm": {
             "enabled": True, "strategy": "round_robin",

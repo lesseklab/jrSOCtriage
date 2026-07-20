@@ -44,16 +44,7 @@ def build_network_context(hosts_data):
 def format_host_entry(host):
     """Format a single host record into a prompt line."""
     name    = host.get("name", "?")
-    # role may be a string or a list (multi-role host). Render as comma-joined
-    # names here — the host inventory stays sparse (names only); the full role
-    # description/notes context goes in the alert host's SOURCE ENRICHMENT.
-    role_raw = host.get("role", "")
-    if isinstance(role_raw, list):
-        role = ", ".join(r.strip() for r in role_raw if isinstance(r, str) and r.strip()) or "?"
-    elif isinstance(role_raw, str) and role_raw.strip():
-        role = role_raw.strip()
-    else:
-        role = "?"
+    role    = host.get("role", "?")
     host_os = host.get("os", "?")  # 'os' shadows stdlib module if imported
     vlan    = host.get("vlan", "?")
     tags    = host.get("tags", [])
@@ -409,6 +400,7 @@ def build_mentioned_block(enrichment):
             city    = ctx.get("city", "N/A")
             asn     = ctx.get("asn", "N/A")
             abuse   = ctx.get("abuse_score", "N/A")
+            gnoise  = ctx.get("greynoise_class", "N/A")
             parts = [f"- {ip} (EXTERNAL)"]
             if rdns != "N/A":
                 parts.append(f"rdns={rdns}")
@@ -421,6 +413,35 @@ def build_mentioned_block(enrichment):
                 parts.append(f"asn={asn}")
             if abuse != "N/A":
                 parts.append(f"abuse_score={abuse}")
+            if gnoise != "N/A":
+                # Mentioned IPs are not necessarily parties to the alert,
+                # so they don't get GREYNOISE STATUS block entries — but
+                # the categorical rides inline (like abuse_score) since
+                # reputation on a mentioned external IP may still be
+                # operationally relevant.
+                parts.append(f"greynoise={gnoise}")
+            # VT/OTX ride the mention only on hash-bearing alerts
+            # (enrich gates the lookups; see mentioned_context build).
+            # Compact segments — the full interpretation notes live in
+            # the party blocks, not here.
+            vt_state = ctx.get("vt_state")
+            if vt_state in ("hit", "clean"):
+                parts.append(
+                    f"vt={ctx.get('vt_malicious', 0)}"
+                    f"/{ctx.get('vt_total', '?')} engines")
+            elif vt_state in ("RATE_LIMITED", "AUTH_FAILED"):
+                parts.append(f"vt={vt_state}")
+            elif vt_state == "not_known":
+                parts.append("vt=not in corpus")
+            otx_state = ctx.get("otx_state")
+            if otx_state == "referenced":
+                p = ctx.get("otx_pulses", 0)
+                p_str = "50+" if isinstance(p, int) and p >= 50 else str(p)
+                parts.append(f"otx={p_str} pulses")
+            elif otx_state == "no_reports":
+                parts.append("otx=no reports")
+            elif otx_state == "RATE_LIMITED":
+                parts.append("otx=RATE_LIMITED")
             lines.append(" | ".join(parts))
         else:
             # Internal: hostname + segment only. Deliberately no host
@@ -442,6 +463,453 @@ def build_mentioned_block(enrichment):
     if overflow > 0:
         lines.append(f"- [+{overflow} more not shown]")
 
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CISA KEV block — v1.1
+# ---------------------------------------------------------------------------
+
+# LLM interpretation note for KEV results (Kevin, 2026-07-13). Rendered
+# ONLY when KEV entries actually appear in the prompt — the note exists to
+# stop two specific verdict failure modes:
+#   1. KEV-listed CVE  -> inflating a routine probe into "active attack"
+#   2. CVE not in KEV  -> treating absence as evidence of benignity
+# It rides the block, never appears standalone, and costs zero tokens on
+# the (overwhelmingly common) no-CVE alert. Scope is KEV ONLY — MITRE
+# tactic/technique interpretation is deliberately untouched.
+_KEV_INTERPRETATION_NOTE = (
+    "Interpretation: A CVE listed in KEV means that vulnerability has "
+    "confirmed exploitation in the wild somewhere, at some time - it is "
+    "NOT evidence that THIS alert represents active exploitation. A CVE "
+    "absent from KEV is NOT evidence this alert is benign; absence only "
+    "means CISA has not confirmed exploitation. Treat KEV status as "
+    "priority context for the vulnerability, never as evidence about "
+    "this specific event."
+)
+
+
+def build_kev_block(enrichment):
+    """
+    Build the KEV STATUS block from enrichment kev_context/kev_state.
+
+    Returns None when the alert produced no KEV output at all (KEV
+    disabled, or no CVEs extracted) — caller suppresses the block
+    entirely, so the interpretation note only ever appears alongside
+    actual KEV results (Kevin's conditional-note rule).
+
+    Degraded states:
+      UNAVAILABLE — CVEs were present but no catalog could be fetched.
+                    One-line statement, no per-CVE entries, no
+                    interpretation note (there are no results to
+                    interpret; the CVEs themselves are visible in the
+                    alert content above).
+      STALE       — entries render normally from the old catalog, with
+                    a staleness caveat line, plus the note.
+    """
+    kev_state = enrichment.get("kev_state")
+    if not kev_state:
+        return None
+
+    if kev_state == "UNAVAILABLE":
+        return ("KEV lookup UNAVAILABLE - this alert references CVE(s) "
+                "but the CISA KEV catalog could not be fetched. Treat "
+                "exploitation-confirmation status as unknown.")
+
+    lines = []
+    for entry in enrichment.get("kev_context", []):
+        cve = entry.get("cve", "?")
+        if entry.get("listed"):
+            details = []
+            if entry.get("date_added"):
+                details.append(f"added {entry['date_added']}")
+            if entry.get("ransomware_use"):
+                details.append("known ransomware campaign use")
+            suffix = f" ({', '.join(details)})" if details else ""
+            lines.append(f"- {cve}: LISTED in CISA KEV{suffix}")
+        else:
+            lines.append(f"- {cve}: not in KEV catalog")
+
+    if kev_state == "STALE":
+        lines.append("- [KEV catalog is >48h stale (refresh failing); "
+                     "listings above are best-effort]")
+
+    lines.append(_KEV_INTERPRETATION_NOTE)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# GreyNoise block — v1.1
+# ---------------------------------------------------------------------------
+
+# LLM interpretation note for GreyNoise results (spec locked 2026-07-14).
+# Rendered ONLY when GreyNoise results are present in the record — same
+# conditional-note rule as KEV: it rides the block, never appears
+# standalone, and costs zero tokens on internal-only alerts. Uses API
+# semantics only (noise / riot / classification) — the red/green/grey
+# color language belongs to the GreyNoise visualizer palette, not the
+# API, and would teach the LLM vocabulary that doesn't exist in the
+# data. The note exists to stop two specific verdict failure modes:
+#   1. noise+malicious -> inflating an aggressive MASS scanner (hitting
+#      everyone, opportunistically) into evidence of targeting
+#   2. not_seen        -> reading absence as missing data instead of
+#      what it is: the targeted-activity signal
+_GREYNOISE_INTERPRETATION_NOTE = (
+    "Interpretation: GreyNoise reports whether an IP has been observed "
+    "mass-scanning the ENTIRE internet. An IP observed as noise is "
+    "engaging in opportunistic internet-wide activity - even when "
+    "classified malicious, that means a known hostile/aggressive MASS "
+    "scanner hitting everyone, NOT evidence this network is specifically "
+    "targeted. A RIOT-listed IP is a known benign business service "
+    "(common DNS, CDN, vendor infrastructure) - a strong "
+    "de-prioritization signal for that indicator. An IP NOT observed "
+    "scanning has no internet-wide footprint in GreyNoise - activity "
+    "from it against this network is more plausibly targeted; treat "
+    "that absence as a signal, not as missing data. RATE_LIMITED means "
+    "the lookup could not be made - treat noise status as unknown."
+)
+
+
+def build_greynoise_block(enrichment):
+    """
+    Build the GREYNOISE STATUS block from greynoise_* fields on the
+    external_context records (populated by enrich_external_ip when
+    enrichment.greynoise is enabled).
+
+    Returns None when no external IP carries a GreyNoise result (source
+    disabled, internal-only alert, or every lookup unavailable) — caller
+    suppresses the block entirely, so the interpretation note only ever
+    appears alongside actual results (the conditional-note rule).
+
+    Per-IP states rendered:
+      riot          known benign business service (keyed lookups only —
+                    the keyless tier strips RIOT data)
+      benign/malicious/unknown
+                    observed internet-wide mass scanner, with
+                    actor/service name and last_seen when present
+      not_seen      NOT observed scanning — a real answer, the
+                    interesting branch
+      RATE_LIMITED  lookup couldn't be made; annotated, not hidden
+
+    N/A entries (lookup unavailable: 401 / timeout / transient) are
+    skipped — same suppression as an N/A abuse_score in the enrichment
+    block. Unrecognized future state strings are skipped defensively.
+    """
+    lines = []
+    for ext in enrichment.get("external_context", []):
+        cls = ext.get("greynoise_class", "N/A")
+        if cls == "N/A":
+            continue
+        ip = ext.get("ip", "?")
+        if cls == "riot":
+            line = f"- {ip}: known benign business service (RIOT)"
+            if ext.get("greynoise_name"):
+                line += f" - {ext['greynoise_name']}"
+        elif cls in ("benign", "malicious", "unknown"):
+            parts = [f"- {ip}: observed mass-scanning the internet",
+                     f"classification={cls}"]
+            if ext.get("greynoise_name"):
+                parts.append(f"actor/service={ext['greynoise_name']}")
+            if ext.get("greynoise_last_seen"):
+                parts.append(f"last_seen={ext['greynoise_last_seen']}")
+            line = " | ".join(parts)
+        elif cls == "not_seen":
+            line = f"- {ip}: NOT observed scanning the internet"
+        elif cls == "RATE_LIMITED":
+            line = f"- {ip}: lookup RATE_LIMITED - noise status unknown"
+        else:
+            continue
+        lines.append(line)
+
+    if not lines:
+        return None
+
+    lines.append(_GREYNOISE_INTERPRETATION_NOTE)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# EPSS block — v1.1
+# ---------------------------------------------------------------------------
+
+# LLM interpretation note for EPSS results (spec locked 2026-07-15).
+# Same conditional-note rule as KEV/GreyNoise: rides the block, never
+# standalone, zero tokens on no-CVE alerts. The note's job is the
+# decision rule, not the definition — the local-vs-global distinction
+# (per Kevin 2026-07-15): likelihood of exploitation in the wild is
+# NOT evidence of exploitation here; the verdict comes from the
+# totality of the evidence. Parallels the shipped KEV note; must never
+# drift into "confirmed/supersedes" phrasing, which is exactly what
+# inflates a signature-mention into a false NOTIFY.
+_EPSS_INTERPRETATION_NOTE = (
+    "Interpretation: EPSS is the modeled probability (0 to 1, updated "
+    "daily by FIRST.org) that each CVE will be exploited in the wild "
+    "somewhere within the next 30 days; percentile is its rank among "
+    "all scored CVEs. A high score or percentile is informative for "
+    "prioritizing the vulnerability but is NOT evidence that this "
+    "alert represents active exploitation on this network - likelihood "
+    "of exploitation in the wild is not the same as exploitation "
+    "observed here. Base the verdict on the totality of the evidence "
+    "in this alert: the observed traffic, host context, and whether "
+    "the activity actually reached or affected anything. \"Not scored\" "
+    "means EPSS has no entry for that identifier - treat as unknown, "
+    "not as low. RATE_LIMITED/unavailable means the lookup could not "
+    "be made - treat probability as unknown."
+)
+
+
+def _fmt_epss(v):
+    """Render an EPSS/percentile float compactly: 0.99999, 0.00018, 0.5
+    — trailing zeros trimmed, never scientific notation."""
+    return f"{v:.5f}".rstrip("0").rstrip(".") or "0"
+
+
+def build_epss_block(enrichment):
+    """
+    Build the EPSS SCORES block from epss_state/epss_entries (populated
+    by enrich_alert when enrichment.epss is enabled and the alert
+    carries CVEs).
+
+    Returns None when EPSS didn't run for this alert (disabled or no
+    CVEs) — the conditional-note rule. When EPSS ran, the block always
+    renders: scored and not-scored entries line-per-CVE, and a degraded
+    state (RATE_LIMITED / UNAVAILABLE) renders an explicit failure line
+    — the LLM should know scores were attempted and are unknown, not
+    silently absent. On a partial failure (some CVEs served from cache,
+    fetch failed for the rest) both the cached lines and the failure
+    line render.
+    """
+    if "epss_state" not in enrichment:
+        return None
+
+    state   = enrichment.get("epss_state", "ok")
+    entries = enrichment.get("epss_entries", [])
+
+    lines = []
+    for e in entries:
+        cve = e.get("cve", "?")
+        if e.get("scored"):
+            lines.append(f"- {cve}: EPSS {_fmt_epss(e['epss'])} | "
+                         f"percentile {_fmt_epss(e['percentile'])}")
+        else:
+            lines.append(f"- {cve}: not scored by EPSS")
+
+    if state != "ok":
+        lines.append(f"- [EPSS lookup {state} - remaining CVE(s) could "
+                     f"not be scored; treat their probability as unknown]")
+
+    lines.append(_EPSS_INTERPRETATION_NOTE)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# VirusTotal block — v1.1
+# ---------------------------------------------------------------------------
+
+# LLM interpretation note for VirusTotal results (spec locked
+# 2026-07-16). Same conditional-note rule as its siblings. This note
+# DELIBERATELY departs from the uniform local-vs-global reputation
+# framing (locked D5): a high-detection file hash ON a host is
+# near-direct evidence about the file itself, and a note that
+# dismissed it with the standard "priority context, not evidence"
+# language would muzzle the one source that can legitimately escalate
+# a verdict on its own weight. The file/IP split keeps both truths;
+# the previous-hash sentence covers the removed-malware case.
+_VT_INTERPRETATION_NOTE = (
+    "Interpretation: VirusTotal reports how many antivirus engines "
+    "detect an indicator, based on GLOBAL submissions. For a FILE HASH "
+    "found on a host: a high detection count means that exact file "
+    "content is known malware - this is strong evidence about the file "
+    "itself, though the verdict still depends on what the file was "
+    "doing there (quarantine directories, AV samples, and honeypots "
+    "legitimately hold malware). A malicious PREVIOUS hash on a changed "
+    "file means known-bad content was present on the host and has just "
+    "been overwritten - evidence of past presence (attacker cleanup, "
+    "malware self-replacement, or AV remediation), worth escalation "
+    "consideration even when the current file is clean. For an IP: "
+    "detections describe the address's reputation elsewhere, NOT "
+    "evidence this event is that activity - weigh with the totality of "
+    "the evidence, as with other reputation sources. \"Not in VT "
+    "corpus\" means never submitted - treat as unknown, not as clean; "
+    "unknown hashes on unexpected paths deserve MORE scrutiny, not "
+    "less. NOT_CHECKED means the per-alert lookup cap was reached. "
+    "AUTH_FAILED means the VirusTotal API key was rejected - a "
+    "configuration problem, not evidence about the alert. "
+    "RATE_LIMITED/unavailable means the lookup could not be made - "
+    "treat as unknown."
+)
+
+_VT_ROLE_LABEL = {"current": "current file", "previous": "previous content"}
+
+
+def _vt_line(prefix, entry):
+    """Render one VT result line. Returns None for skip-states."""
+    state = entry.get("state")
+    if state in (None, "N/A"):
+        # Unavailable — same suppression as an N/A abuse_score.
+        return None
+    if state == "hit":
+        parts = [f"{prefix}: {entry.get('malicious', '?')}/"
+                 f"{entry.get('total', '?')} engines malicious"]
+        if entry.get("suspicious"):
+            parts.append(f"{entry['suspicious']} suspicious")
+        if entry.get("label"):
+            parts.append(f"label: {entry['label']}")
+        return " | ".join(parts)
+    if state == "clean":
+        return (f"{prefix}: known to VT, 0 detections "
+                f"({entry.get('total', '?')} engines)")
+    if state == "not_known":
+        return f"{prefix}: not in VT corpus - never submitted, treat as unknown"
+    if state == "NOT_CHECKED":
+        return f"{prefix}: NOT_CHECKED (per-alert cap)"
+    if state == "RATE_LIMITED":
+        return f"{prefix}: lookup RATE_LIMITED - reputation unknown"
+    if state == "AUTH_FAILED":
+        return (f"{prefix}: lookup AUTH_FAILED - VirusTotal API key "
+                f"rejected; all VT lookups unavailable until the key "
+                f"is fixed")
+    return None  # future-proof: unrecognized state, skip
+
+
+def build_vt_block(enrichment):
+    """
+    Build the VIRUSTOTAL block from vt_hashes (enrich_alert) and the
+    vt_* fields on external_context records (enrich_external_ip).
+
+    Returns None when nothing renders (source disabled, no indicators,
+    or every lookup unavailable) — the conditional-note rule: the
+    interpretation note only ever rides actual results. Hash lines
+    render first (they're the headline), current-file before
+    previous-content (extraction order), then IP lines.
+    """
+    lines = []
+    for e in enrichment.get("vt_hashes", []):
+        role = _VT_ROLE_LABEL.get(e.get("role"), "file")
+        line = _vt_line(f"- {role} {e.get('hash', '?')}", e)
+        if line:
+            lines.append(line)
+    for ext in enrichment.get("external_context", []):
+        if "vt_state" not in ext:
+            continue
+        entry = {"state": ext.get("vt_state"),
+                 "malicious": ext.get("vt_malicious"),
+                 "total": ext.get("vt_total"),
+                 "label": ext.get("vt_label")}
+        line = _vt_line(f"- {ext.get('ip', '?')}", entry)
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return None
+
+    lines.append(_VT_INTERPRETATION_NOTE)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# AlienVault OTX block — v1.1
+# ---------------------------------------------------------------------------
+
+# The note's name-skepticism language leads (revised per live curls
+# 2026-07-17): the attribution payload — pulse names — is polluted
+# exactly where counts are high (EICAR's top pulses are literally
+# student labs), so names are framed as leads to corroborate, never
+# attribution. The one earned exception mirrors VT's locked-D5
+# asymmetry: a named family/adversary on a FILE HASH found on a host
+# is the strongest form of this signal, but only IF corroborated.
+# "No community reports" honestly covers BOTH unknown indicators and
+# known-but-unreferenced — live-verified, the API cannot distinguish
+# them — so the note maps it to unknown, not clean.
+_OTX_INTERPRETATION_NOTE = (
+    "Interpretation: OTX pulses are community-contributed threat "
+    "reports (IOC collections for campaigns, malware families, and "
+    "attacker infrastructure). Pulse membership means someone "
+    "referenced this indicator in community reporting - it is a "
+    "POINTER, not a verdict, and not evidence that this alert is that "
+    "activity. Pulse names are UNVETTED community labels: training-lab "
+    "exercises and auto-generated pulses are common, so treat names as "
+    "leads to corroborate, not as attribution. Recency matters - weigh "
+    "the latest reference date. A named malware family or adversary on "
+    "a FILE HASH found on a host is the strongest form of this signal, "
+    "worth naming in the verdict reasoning IF corroborated by the "
+    "other evidence (VirusTotal detections, file path, host context). "
+    "\"No community reports\" means no analyst reference exists OR the "
+    "indicator is unknown to OTX - treat as unknown, not as clean. "
+    "RATE_LIMITED/unavailable means the lookup could not be made - "
+    "treat as unknown."
+)
+
+
+def _otx_line(prefix, entry):
+    """Render one OTX result line. Returns None for skip-states."""
+    state = entry.get("state")
+    if state in (None, "N/A"):
+        # Unavailable — same suppression as an N/A vt_state.
+        return None
+    if state == "referenced":
+        count = entry.get("pulses", 0)
+        # 50 is the observed page-cap saturation point — render as a
+        # floor, not an exact count. The numeric field stays 50.
+        count_str = "50+" if isinstance(count, int) and count >= 50 \
+            else str(count)
+        plural = "" if count == 1 else "s"
+        parts = [f"{prefix}: {count_str} community pulse{plural}"]
+        if entry.get("latest"):
+            parts.append(f"latest {entry['latest']}")
+        names = entry.get("names") or []
+        if names:
+            parts.append(", ".join(f'"{n}"' for n in names))
+        families = entry.get("families") or []
+        if families:
+            parts.append(f"families: {', '.join(families)}")
+        if entry.get("adversary"):
+            parts.append(f"adversary: {entry['adversary']}")
+        return " | ".join(parts)
+    if state == "no_reports":
+        return f"{prefix}: no community reports"
+    if state == "RATE_LIMITED":
+        return f"{prefix}: lookup RATE_LIMITED - community status unknown"
+    return None  # future-proof: unrecognized state, skip
+
+
+def build_otx_block(enrichment):
+    """
+    Build the OTX COMMUNITY INTELLIGENCE block from otx_hashes
+    (enrich_alert) and the otx_* fields on external_context records
+    (enrich_external_ip).
+
+    Returns None when nothing renders (source disabled, no indicators,
+    or every lookup unavailable) — the conditional-note rule: the
+    interpretation note only ever rides actual results. Hash lines
+    render first (the hash-first lesson: FIM alerts fire daily, IP
+    lines sit behind the external-alert gate), current-file before
+    previous-content (extraction order), then IP lines. Role labels
+    are shared with VT — same extraction, same vocabulary.
+    """
+    lines = []
+    for e in enrichment.get("otx_hashes", []):
+        role = _VT_ROLE_LABEL.get(e.get("role"), "file")
+        line = _otx_line(f"- {role} {e.get('hash', '?')}", e)
+        if line:
+            lines.append(line)
+    for ext in enrichment.get("external_context", []):
+        if "otx_state" not in ext:
+            continue
+        entry = {"state": ext.get("otx_state"),
+                 "pulses": ext.get("otx_pulses"),
+                 "latest": ext.get("otx_latest"),
+                 "names": ext.get("otx_names"),
+                 "families": ext.get("otx_families"),
+                 "adversary": ext.get("otx_adversary")}
+        line = _otx_line(f"- {ext.get('ip', '?')}", entry)
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return None
+
+    lines.append(_OTX_INTERPRETATION_NOTE)
     return "\n".join(lines)
 
 
@@ -853,16 +1321,6 @@ def build_prompt(alert, enrichment, baseline, hosts_data,
     sections.append("\nSOURCE ENRICHMENT:")
     sections.append(build_enrichment_block(enrichment))
 
-    # --- Alert host role context ---
-    # The alert host's role(s) resolved to their description/notes from
-    # roles.json (set by enrich_alert as agent_role_context). Blank-aware:
-    # the list is empty when the host has no roles, roles.json is absent, or
-    # the roles are bare stubs — in which case nothing is appended.
-    role_ctx = enrichment.get("agent_role_context", [])
-    if role_ctx:
-        sections.append("\nHOST ROLE CONTEXT (what is normal for this host's role(s)):")
-        sections.append("\n".join(role_ctx))
-
     # --- Mentioned-IP block ---
     # IPs found by regex scan of full_log that did NOT appear in the
     # alert's structured IP fields. Rendered as a separate block with
@@ -875,6 +1333,56 @@ def build_prompt(alert, enrichment, baseline, hosts_data,
             "(may or may not be parties to this alert):"
         )
         sections.append(mentioned_block)
+
+    # --- CISA KEV status (v1.1) ---
+    # Suppressed entirely unless KEV produced output for this alert;
+    # the interpretation note rides inside the block (see build_kev_block).
+    kev_block = build_kev_block(enrichment)
+    if kev_block:
+        sections.append("\nKEV STATUS (CISA Known Exploited Vulnerabilities):")
+        sections.append(kev_block)
+
+    # --- EPSS scores (v1.1) ---
+    # Adjacent to KEV (locked D1: both are CVE-keyed; the LLM reads the
+    # confirmed-past / forward-likelihood pairing together). Suppressed
+    # entirely unless EPSS ran for this alert; the interpretation note
+    # rides inside the block (see build_epss_block).
+    epss_block = build_epss_block(enrichment)
+    if epss_block:
+        sections.append("\nEPSS SCORES (exploitation probability, next 30 days):")
+        sections.append(epss_block)
+
+    # --- GreyNoise status (v1.1) ---
+    # Suppressed entirely unless at least one external IP carries a
+    # GreyNoise result; the interpretation note rides inside the block
+    # (see build_greynoise_block).
+    greynoise_block = build_greynoise_block(enrichment)
+    if greynoise_block:
+        sections.append("\nGREYNOISE STATUS "
+                        "(internet-wide mass-scanning intelligence):")
+        sections.append(greynoise_block)
+
+    # --- VirusTotal (v1.1) ---
+    # Suppressed entirely unless VT produced results for this alert;
+    # the interpretation note (with the locked evidence-asymmetry
+    # framing) rides inside the block (see build_vt_block).
+    vt_block = build_vt_block(enrichment)
+    if vt_block:
+        sections.append("\nVIRUSTOTAL (antivirus engine detections):")
+        sections.append(vt_block)
+
+    # --- AlienVault OTX (v1.1) ---
+    # After VT deliberately: engine detections say WHAT a file is;
+    # pulses say WHO has reported it and in connection with what — the
+    # LLM reads the fact before the attribution-flavored context.
+    # Suppressed entirely unless OTX produced results for this alert;
+    # the interpretation note (name-skepticism lead) rides inside the
+    # block (see build_otx_block).
+    otx_block = build_otx_block(enrichment)
+    if otx_block:
+        sections.append("\nOTX COMMUNITY INTELLIGENCE "
+                        "(analyst-contributed threat reports):")
+        sections.append(otx_block)
 
     # --- Baseline ---
     sections.append("\nALERT FREQUENCY BASELINE:")

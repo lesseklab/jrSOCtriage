@@ -134,6 +134,73 @@ def build_gelf_message(alert, enrichment, baseline, llm_result=None,
         "_gl2_src_asn":          enrichment.get("gl2_src_asn", "N/A"),
         "_gl2_src_rdns":         enrichment.get("gl2_src_rdns", "N/A"),
         "_gl2_abuse_score":      enrichment.get("gl2_abuse_score", "N/A"),
+        # v1.1 CISA KEV: "true"/"false" when CVEs were checked,
+        # "UNAVAILABLE"/"STALE" for degraded lookups, "N/A" when the
+        # alert had no CVEs or KEV is disabled. Searchable:
+        # gl2_kev_listed:true / gl2_kev_listed:UNAVAILABLE.
+        "_gl2_kev_listed":       enrichment.get("gl2_kev_listed", "N/A"),
+        # v1.1 GreyNoise: categorical state of the FIRST external IP —
+        # riot / benign / malicious / unknown / not_seen / RATE_LIMITED,
+        # "N/A" when disabled, no external IPs, or lookup unavailable.
+        # Searchable: gl2_greynoise_class:not_seen (the targeted-activity
+        # signal) / gl2_greynoise_class:RATE_LIMITED (quota audit).
+        "_gl2_greynoise_class":  enrichment.get("gl2_greynoise_class", "N/A"),
+        # v1.1 EPSS (locked D2): numeric max EPSS score across the
+        # alert's CVEs. Present ONLY when at least one CVE scored —
+        # None here is dropped by the None-filter below, keeping the
+        # field float-typed in Elasticsearch so range queries work
+        # (gl2_epss_max:>0.5). Deliberately NOT the always-ship-"N/A"
+        # pattern: mixing "N/A" strings into a numeric field breaks
+        # its typing, killing the range searches that are this field's
+        # entire purpose. Not-scored/degraded states are visible in
+        # the prompt's EPSS block and epss_state, not this field.
+        # _exists_:gl2_epss_max distinguishes populated records.
+        "_gl2_epss_max":         enrichment.get("gl2_epss_max"),
+        # v1.1 VirusTotal: numeric max malicious-engine count across
+        # every indicator that returned counts (hashes and IPs, hit and
+        # clean — checked-clean ships 0, distinguishing it from
+        # unchecked). Same numeric-when-present pattern as
+        # gl2_epss_max: None here is dropped by the None-filter below,
+        # keeping the field float/int-typed in Elasticsearch for range
+        # queries (gl2_vt_malicious:>5). Degraded/not-known states are
+        # visible in the prompt and record, not this field.
+        "_gl2_vt_malicious":     enrichment.get("gl2_vt_malicious"),
+        # v1.1 OTX (locked D5): numeric max community-pulse count
+        # across every checked indicator (hashes and IPs). Same
+        # numeric-when-present pattern as gl2_epss_max: None here is
+        # dropped by the None-filter below, keeping the field
+        # int-typed in Elasticsearch for range queries
+        # (gl2_otx_pulses:>0 = "indicators appear in community
+        # reporting"). no_reports ships 0 — checked-and-unreferenced,
+        # the VT checked-clean-zero precedent — so 0 distinguishes
+        # "checked, none" from unchecked/absent. Count saturates at
+        # 50 upstream (OTX page cap; the prompt renders "50+"); the
+        # field stays numeric. Degraded/unavailable states are
+        # visible in the prompt's OTX block and the record, not here.
+        "_gl2_otx_pulses":       enrichment.get("gl2_otx_pulses"),
+        # v1.1 mentioned-IP intel: worst-of across external IPs found
+        # by regex in full_log (NOT parties to the alert — that's what
+        # keeps these separate from gl2_greynoise_class /
+        # gl2_abuse_score, which stay party-only by design). Present
+        # only when a mentioned external IP produced a real answer;
+        # the None-filter drops them otherwise. Searchable:
+        # gl2_mentioned_greynoise_worst:malicious /
+        # gl2_mentioned_abuse_max:>50 — "the alert TEXT references
+        # known-bad infrastructure", a different question from "the
+        # alert's counterparty is known-bad".
+        "_gl2_mentioned_abuse_max":
+            enrichment.get("gl2_mentioned_abuse_max"),
+        "_gl2_mentioned_greynoise_worst":
+            enrichment.get("gl2_mentioned_greynoise_worst"),
+        # VT/OTX mentioned worst-ofs exist only on hash-bearing alerts
+        # (enrich gates the lookups — 2026-07-18 decision: mentioned-IP
+        # VT/OTX earns its quota only when it can corroborate hash
+        # intel on the same record). Numeric-when-present; clean/none
+        # ship 0; the None-filter drops the unchecked case.
+        "_gl2_mentioned_vt_malicious":
+            enrichment.get("gl2_mentioned_vt_malicious"),
+        "_gl2_mentioned_otx_pulses":
+            enrichment.get("gl2_mentioned_otx_pulses"),
 
         # Baseline fields - for anomaly dashboards
         "_gl2_count_last_hour":       baseline.get("count_last_hour", 0) if baseline else 0,

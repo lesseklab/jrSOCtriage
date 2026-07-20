@@ -3,64 +3,82 @@
     "org": "",
     "security_domain": ""
   },
+  "wazuh_api": {
+    "url": "",
+    "username": "",
+    "password": "",
+    "dns_server": "",
+    "verify_ssl": true
+  },
   "sources": {
     "wazuh": {
+      "enabled": true,
       "alerts_file": "/var/ossec/logs/alerts/alerts.json"
     },
     "zeek": {
-      "enabled": false,
+      "enabled": true,
       "current_log_dir": "/opt/zeek/logs/current",
-      "archive_log_dir": "/opt/zeek/logs"
+      "archive_log_dir": ""
     },
     "ntopng": {
       "enabled": false,
-      "endpoint": "http://REPLACE_ME:3000",
-      "ifid": 1,
+      "endpoint": "http://REPLACE_ME:3001",
+      "ifid": 0,
+      "verify_ssl": true,
+      "skip_networks": [],
       "auth": {
-        "username": "REPLACE_ME",
-        "password": "REPLACE_ME"
-      },
-      "verify_ssl": false,
-      "skip_networks": []
+        "username": "admin",
+        "password": ""
+      }
     },
     "graylog": {
       "enabled": false,
       "endpoint": "http://REPLACE_ME:9000",
-      "auth": {
-        "username": "REPLACE_ME",
-        "password": "REPLACE_ME"
-      },
-      "verify_ssl": false,
       "context_window_minutes": 0.5,
-      "max_results": 100
+      "max_results": 100,
+      "verify_ssl": true,
+      "auth": {
+        "username": "admin",
+        "password": ""
+      }
     }
   },
   "processing": {
     "poll_interval_seconds": 30,
-    "max_batch_size": 200,
+    "max_batch_size": 250,
     "dedup_silence_seconds": 240,
     "baseline_multiplier": 2.0,
     "min_baseline_days": 3,
     "escalation_multiplier": 4.0,
-    "sensor_agent_names": ["wazuh.manager", "wazuh-manager", "suricata"]
+    "max_workers": 1,
+    "sensor_agent_names": [
+      "wazuh.manager",
+      "wazuh-manager",
+      "suricata"
+    ]
   },
   "filtering": {
     "min_rule_level": 6,
     "abuse_escalation_threshold": 50,
+    "escalate_first_seen_rule": true,
+    "first_seen_lookback_days": 14,
+    "frequency_escalation_enabled": true,
     "always_include": {
       "networks": [],
       "hosts": []
-    },
-    "escalate_first_seen_rule": true,
-    "first_seen_lookback_days": 14
+    }
   },
   "enrichment": {
+    "enable_host_lookup": true,
+    "enable_network_lookup": true,
     "geo_ip": {
       "enabled": true,
+      "provider": "ip-api.com",
       "skip_private": true
     },
     "whois": {
-      "enabled": false
+      "enabled": true,
+      "skip_private": true
     },
     "rdns": {
       "enabled": true,
@@ -68,8 +86,34 @@
     },
     "abuseipdb": {
       "enabled": false,
-      "api_key": "REPLACE_ME",
-      "score_threshold": 25
+      "api_key": "",
+      "score_threshold": 25,
+      "skip_private": true
+    },
+    "cisa_kev": {
+      "enabled": false
+    },
+    "greynoise": {
+      "enabled": false,
+      "api_key": "",
+      "skip_private": true,
+      "rate_limit_warnings": true
+    },
+    "epss": {
+      "enabled": false
+    },
+    "virustotal": {
+      "enabled": false,
+      "api_key": "",
+      "per_alert_cap": 4,
+      "skip_private": true,
+      "rate_limit_warnings": false
+    },
+    "otx": {
+      "enabled": false,
+      "api_key": "",
+      "skip_private": true,
+      "rate_limit_warnings": false
     }
   },
   "llm": {
@@ -92,14 +136,16 @@
   },
   "email": {
     "enabled": false,
-    "smtp_host": "smtp.example.com",
+    "smtp_host": "smtp.gmail.com",
     "smtp_port": 587,
     "use_tls": true,
-    "username": "REPLACE_ME",
-    "password": "REPLACE_ME",
-    "from_address": "REPLACE_ME",
-    "to_address": "REPLACE_ME",
+    "smtp_security": "starttls",
+    "username": "",
+    "password": "",
+    "from_address": "",
+    "to_address": "",
     "note_address": "",
+    "subject_prefix": "[jrSOC ALERT]",
     "subject_prefix_notify": "[jrSOC ALERT]",
     "subject_prefix_note": "[jrSOC NOTE]",
     "min_confidence_to_email": "MEDIUM",
@@ -112,35 +158,49 @@
       "port": 12201
     }
   },
-  "interface": {
-    "host": "127.0.0.1",
-    "port": 9090,
-    "session_timeout_minutes": 30
-  },
-  "logging": {
-    "log_file": "./jrsoc.log",
-    "prompt_log_mode": "anonymized"
-  },
-  "timezone": {
-    "zeek_local_tz_offset": -5,
-    "zeek_local_tz_name": "CDT"
-  },
-  "paths": {
-    "hosts_file": "./hosts.json",
-    "rules_file": "./rules.json",
-    "position_file": "./.alerts_position",
-    "db_file": "./jrsoc.db",
-    "zeek_archive_dir": "/opt/zeek/logs"
-  },
   "prompt_customization": {
     "strip_redundant_fields": true,
     "sensor_context": [
-      "Wazuh agents report from individual hosts; alerts without src/dst IP are host-local events"
+      "Suricata is running on a SPAN/mirror port",
+      "SPAN sensors may generate TCP anomaly alerts (invalid ACK, RST, checksum errors) due to packet capture artifacts rather than actual malicious activity",
+      "TCP stream alerts at Priority 3 on SPAN deployments should be weighted accordingly for TCP-level anomalies only \u2014 application-layer protocol failures (Applayer alerts) from external IPs with high abuse scores or suspicious rdns should not be dismissed as SPAN artifacts.",
+      "Flow direction on SPAN may not always reflect true initiator \u2014 however this does not apply to clearly directional inbound connections from external IPs to DMZ hosts.",
+      "Wazuh agents report from individual hosts; alerts without src/dst IP are host-local events",
+      "Wazuh rootcheck rule 510 is a known false positive source on modern Linux \u2014 generic signatures match legitimate PAM library references in standard system binaries such as /bin/passwd, /bin/ls, and /usr/bin/ls. Verify with dpkg -V or rpm -V before acting."
     ],
     "network_notes": [],
     "triage_guidance": [
-      "Distinguish between user applications and background agents/services (e.g., updaters, schedulers, service hosts, browser agents) — do not assume a user was actively present unless the evidence supports it",
-      "Include key corroborating evidence (e.g., relevant Zeek flows, DNS queries, log entries) that directly supports the root cause identification — don't just state conclusions, show the evidence."
+      "The SPAN artifact explanation does not apply when the source IP has a high abuse score or known malicious rdns. Treat application-layer protocol anomalies from suspicious external IPs as potentially intentional evasion, not sensor noise.",
+      "ntopng L7 protocol labels (e.g., TLS.Azure, HTTP.Google) reflect the destination service infrastructure, not the source intent. When alert is about an external ip - always cross-reference external IP rdns and abuse score before using L7 labels to justify a SUPPRESS verdict on inbound external connections. ntopng data is realtime \u2014 flows shown reflect current activity at prompt-build time, not necessarily what was happening at alert time. For Wazuh syscheck (FIM) alerts, the actual file change may have occurred minutes before the alert was emitted, and ntopng flows visible now may be unrelated to the event. Use Zeek connection records or host logs as primary evidence for time-of-event correlation; treat ntopng as supporting context for current-state assessment."
     ]
+  },
+  "timezone": {
+    "zeek_local_tz_offset": "+00:00",
+    "zeek_local_tz_name": "UTC"
+  },
+  "logging": {
+    "level": "info",
+    "log_file": "/opt/jrsoctriage/jrsoc.log",
+    "prompt_log_mode": "anonymized",
+    "debug_llm_payload": false
+  },
+  "observability": {
+    "lag_log_interval_seconds": 30
+  },
+  "interface": {
+    "session_timeout_minutes": 30
+  },
+  "database": {
+    "enabled": true
+  },
+  "paths": {
+    "hosts_file": "/opt/jrsoctriage/hosts.json",
+    "rules_file": "/opt/jrsoctriage/rules.json",
+    "db_file": "/opt/jrsoctriage/jrsoc.db",
+    "users_file": "/opt/jrsoctriage/users.json",
+    "domain_file": "/opt/jrsoctriage/domain.json",
+    "anonymization_file": "/opt/jrsoctriage/anonymization.json",
+    "ip_aliases_file": "/opt/jrsoctriage/ip_aliases.json",
+    "position_file": "/opt/jrsoctriage/.ingest_position"
   }
 }

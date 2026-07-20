@@ -78,14 +78,41 @@ waits — the pipeline is never "a window" behind real time.
 
 ### Why am I seeing ntopng errors — sometimes a red error saying ntopng didn't respond?
 
-Because ntopng has no data for that host, so the alert completes without ntopng
-context — typically an external IP that ntopng never saw a local flow for.
-Newer versions of ntopng changed this behavior: instead of returning an empty
-HTTP 200, ntopng now closes the connection, which the pipeline surfaces as a red
-"did not respond" error. It is isolated to ntopng — Graylog and Zeek for the
-same host in the same cycle complete fine, which is how you can tell it is not a
-network problem. The alert is still fully triaged; it just proceeds without the
-ntopng enrichment for that host. Not a problem.
+Two different situations produce the identical message:
+
+```
+ntopng request error: ('Connection aborted.',
+RemoteDisconnected('Remote end closed connection without response'))
+```
+
+Both are benign. Tell them apart by what happens next.
+
+**ntopng has no data for that host — the error *is* the answer.** Newer versions
+of ntopng signal "no flow data for this host" by closing the connection instead
+of returning an empty HTTP 200. This is typically an external IP that ntopng
+never saw a local flow for. Nothing retries, because nothing failed: the alert
+is fully triaged and simply proceeds without ntopng context for that one host,
+which is correct — there is no context to add. The rate of these tracks how many
+external or unknown hosts you are looking up, so it rises during load tests and
+busy periods.
+
+**A keep-alive connection closed underneath a worker — the retry succeeds.**
+ntopng's embedded web server closes idle keep-alive connections aggressively.
+Under concurrency a worker can reuse one at the moment ntopng closes it, which
+surfaces as the same red error, and the automatic retry immediately succeeds.
+You will see this for local hosts ntopng *does* have data for, and the log lines
+for that same cycle report the data arriving (`ntopng returned data for 2/2
+IP(s)`). It is most common right after a restart, when clearing a backlog puts
+many workers on fresh connections at once — but any sustained high-concurrency
+period produces it, restart or not.
+
+Either way it is isolated to ntopng: Graylog and Zeek query the same host in the
+same cycle and are unaffected, which is how you know it is not a network
+problem. The retry behavior is correct and needs no configuration.
+
+Worth investigating only if retries stop succeeding, or if ntopng stops
+returning data for hosts it should have — that is ntopng being down, which is a
+different symptom.
 
 ---
 

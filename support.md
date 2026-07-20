@@ -13,7 +13,7 @@ Before anything paid: basic help is free. If you hit a bug, have a
 question, or want to request a feature, open an issue on the jrSOCtriage
 GitHub repository:
 
-**[GitHub Issues — jrSOCtriage](GITHUB_ISSUES_URL_PLACEHOLDER)**
+**[GitHub Issues — jrSOCtriage](https://github.com/lesseklab/jrSOCtriage/issues)**
 
 Community support is best-effort and handled as time allows, but it costs
 nothing and it's the right first stop for most questions. A support

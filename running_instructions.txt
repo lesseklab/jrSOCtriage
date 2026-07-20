@@ -242,7 +242,7 @@ pattern into a managed one is a deliberate path on the roadmap.
 Roles (roles.json with shared context, so context is written once
 per role instead of once per host) shipped in v1.0. The remaining
 steps: the config-to-database migration plus periodic config sync
-between instances (v1.2 — hosts, rules, and the rest move from
+between instances (v1.3 — hosts, rules, and the rest move from
 per-instance JSON files into a local database with a tenant_id
 column on every table from day one; a candidate follow-on then
 syncs the shareable config tables — hosts, roles, rules — between
@@ -454,12 +454,11 @@ the cloud model produces a clean verdict in 3-6 seconds, and the
 verdict ships to Graylog correctly. That's the
 specialist-escalation pattern doing its job: local handles the
 bulk efficiently, cloud handles the genuinely-hard tail at
-pennies per call. Sustained-pressure behavior (Ollama down for
-an extended
-period, or an alert storm with no local LLM recovery) has not been
-tested at v1.0 — that's a v1.1 load-harness target. The escalation
-code path has been exercised hundreds of times in production and
-is operationally validated.
+pennies per call. Sustained-pressure behavior was exercised in the pre-1.0
+load-harness campaigns (raw alert volume tested well into the
+millions per day — see the WORKED EXAMPLE later in this document).
+The escalation code path has been exercised hundreds of times in
+production and is operationally validated.
 
 WHAT'S ESTIMATED — CLOUD-LLM CEILING
 -------------------------------------
@@ -812,10 +811,8 @@ v1.0's write profile is already minimal: dedup is in-memory,
 baselines are computed from read-only queries, frequency writes
 are aggregated per dedup window (one row per window with an
 occurrence count, not one per raw alert), and each commit batches
-its INSERT plus retention DELETE. The v1.3 roadmap reduces
-per-alert fsync count further (for hardware-lifespan and
-storm-resilience reasons, not capacity); v1.7 moves hot-path
-writes to Redis; v2.0 swaps cold history for PostgreSQL.
+its INSERT plus retention DELETE. v2.0 swaps cold history for
+PostgreSQL.
 
 STORM TEST HISTORY
 ------------------
@@ -895,7 +892,7 @@ not currently implement adaptive burst capacity (e.g., temporarily
 activating cloud endpoints alongside local Ollama when queue
 depth exceeds a threshold). Adaptive surge handling — dynamic
 worker provisioning, queue-aware backpressure, and surge-triggered
-dedup widening — is the lead v1.1 deliverable (see roadmap.md).
+dedup widening — is the lead v1.2 deliverable (see roadmap.md).
 If your environment is storm-prone today, plan accordingly: tune
 rules.json aggressively for known-noisy rules, raise max_concurrent
 on your endpoints, configure a cloud fallback (which absorbs
@@ -911,10 +908,10 @@ Not measured at any scale:
   - Multi-tenant or multi-site deployments
   - Sustained sub-second alert bursts of genuinely distinct
     (non-deduplicating) alerts
-  - Adaptive cloud burst capacity (not yet implemented in v1.0;
-    planned as the lead v1.1 deliverable — see roadmap.md)
+  - Adaptive cloud burst capacity (not yet implemented;
+    planned as the lead v1.2 deliverable — see roadmap.md)
   - Hardware-token or keyring-based credential storage (planned
-    for v1.1 — see roadmap.md)
+    for v1.2 — see roadmap.md)
 
 (Raw alert volume itself has been load-tested well into the
 millions per day — see the WORKED EXAMPLE earlier in this
@@ -947,10 +944,10 @@ have direct fixes available today:
     RAM-disk migration, that is a real "approaching the edge of
     what v1.0 targets" indicator.
 
-The v1.1+ roadmap addresses the remaining architectural
+The v1.2+ roadmap addresses the remaining architectural
 constraints directly (adaptive surge handling and keyring
-credentials in v1.1; config migration with tenant abstraction in
-v1.2; batched hot-path writes in v1.3; Redis hot path in v1.7).
+credentials in v1.2; config migration with tenant abstraction in
+v1.3; cold-history PostgreSQL at v2.0).
 But for the two most common symptoms — lock timeouts and endpoint
 backups — you do not need to wait for a future version; the fixes
 are available now.
@@ -1587,16 +1584,19 @@ Reading it gives an attacker:
   - Graylog API username and password
   - SMTP username and password (for email notifications)
   - AbuseIPDB API key
+  - GreyNoise, VirusTotal, and AlienVault OTX API keys (v1.1
+    threat-intelligence sources)
 There is no keyring integration, no environment-variable
 indirection, and no encryption at rest in v1.0. This is
 appropriate for a host with only trusted OS users. It is NOT
 appropriate for shared hosts where untrusted local users have
 accounts.
 
-v1.1 will add keyring-based credential storage with a one-shot
+v1.2 will add keyring-based credential storage with a one-shot
 migration from existing config.json. This is the largest single
-security concern in v1.0 and closing it is a v1.1 priority — see
-roadmap.md for the full v1.1 feature list. Until v1.1 ships,
+security concern in this release and closing it is a v1.2
+priority — see roadmap.md for the full v1.2 feature list. Until
+v1.2 ships,
 operators in environments where filesystem credentials are a
 real concern should use file-system permissions (mode 600,
 ownership locked to the service account) and consider running
@@ -1701,13 +1701,13 @@ Credential rotation
   - Web interface user password / TOTP: see the USERS (web
     interface logins) section in interface_guide.txt.
 
-v1.1 adds keyring-based credential storage with a one-shot
+v1.2 adds keyring-based credential storage with a one-shot
 migration from existing config.json — see roadmap.md for the
-full v1.1 feature list. For v1.0, plaintext in mode-600 root-owned
-files is the security model. If your threat model requires
-keyring-grade credential isolation today, wait for v1.1 or do not
-deploy v1.0 in environments where filesystem credentials are a
-concern.
+full v1.2 feature list. Until then, plaintext in mode-600
+root-owned files is the security model. If your threat model
+requires keyring-grade credential isolation today, wait for v1.2
+or do not deploy in environments where filesystem credentials are
+a concern.
 
 
 ============================================================
@@ -2144,7 +2144,8 @@ configured for JSON logs (the json-streaming / json-logs policy), the reader
 finds no "#fields" header and silently returns EMPTY Zeek context with no
 error — alerts will simply show no network flow data. If you are pointing
 jrSOCtriage at an existing Zeek sensor, confirm it logs TSV first. (JSON /
-dual-format support is planned for v1.1; until then TSV is required.)
+dual-format support is planned for a later release; until then TSV is
+required.)
 
 Check status:   sudo systemctl status zeek
 Start:          sudo systemctl start zeek
@@ -2587,21 +2588,27 @@ VERIFYING THE PIPELINE IS WORKING
    tried every endpoint in your strategy and got no usable
    response from any of them.
 
+   RECOMMENDATION: configure a cloud API endpoint as failover.
+   This is not an optional nicety — the economics are decisive.
+   This lab's production numbers: local-primary (gemma4:26b on an
+   RTX 3090) averages ~10 alerts/day that the local model cannot
+   close within the request timeout. With failover configured,
+   each of those goes to gpt-4o-mini at roughly $0.0007 per call
+   — well under a penny a day for a clean verdict on exactly the
+   alerts that most benefit from a smarter model. Without
+   failover, those same alerts ship as FAILED and an analyst has
+   to triage them by hand, which costs more than a penny.
+
    Expected rates from production observation:
-     - With cloud fallback configured (e.g., local Ollama →
-       Claude Haiku or GPT-4.1 mini): FAILED should be
-       vanishingly rare. Cloud handles the genuinely-hard alerts
-       that exceeded the local model's reasoning budget.
-     - Single-endpoint local Ollama only: approximately 1-2
-       FAILED per day at this lab's ~2,400 LLM-triaged alerts/day
-       was observed during approximately one month of continuous
-       production operation on gemma4:26b (RTX 3090). The failures
+     - With cloud fallback configured (this lab: gemma4:26b →
+       gpt-4o-mini): FAILED is vanishingly rare. The failures
        concentrate on genuinely-hard alerts where the local model
        cannot reach a confident verdict within the request timeout
        — by definition the alerts that most benefit from a smarter
-       cloud model. They disappear when a cloud fallback is
-       enabled, because the cloud model handles those alerts in
-       4-6 seconds with a clean verdict.
+       cloud model. The cloud model handles those in 4-6 seconds
+       with a clean verdict.
+     - Single-endpoint local only: those ~10/day (at this lab's
+       volume; scale with yours) ship as FAILED instead.
 
    Finding alerts that escalated to cloud fallover:
    With fallover configured, alerts where the local model failed
@@ -2630,6 +2637,121 @@ VERIFYING THE PIPELINE IS WORKING
    producing FAILED records during the issue, so the alert tells
    you what to investigate without losing alert audit trail.
 
+10. Confirm the threat-intelligence sources (v1.1) are producing:
+    Each enabled source ships a flat Graylog field on qualifying
+    alerts. Coverage checks:
+
+      _exists_:gl2_kev_listed          (any CVE-bearing alert)
+      _exists_:gl2_epss_max            (any CVE-bearing alert)
+      _exists_:gl2_vt_malicious        (any hash-bearing or
+                                        external-IP alert)
+      _exists_:gl2_otx_pulses          (same)
+      _exists_:gl2_greynoise_class AND NOT gl2_greynoise_class:"N\/A"
+                                       (any external-IP alert)
+
+    Hash-bearing FIM alerts (file or registry-value changes) fire
+    the VT and OTX hash paths on ordinary daily traffic. The
+    IP-path fields only populate on alerts with an external party
+    IP, which a well-tuned network may produce rarely — absence of
+    IP-path results on a quiet network is not a fault. See
+    graylog_searches.txt, THREAT INTELLIGENCE SEARCHES, for the
+    full field semantics (including which fields are
+    numeric-when-present vs always-present strings).
+
+
+============================================================
+THREAT-INTELLIGENCE ENRICHMENT — OPERATIONAL NOTES (v1.1)
+============================================================
+
+The five v1.1 sources (GreyNoise, CISA KEV, EPSS, VirusTotal,
+AlienVault OTX) share one operational contract. Knowing it makes
+the journal and the shipped records self-explanatory.
+
+DEGRADED LOOKUPS FAIL LOUD, AND NEVER CACHE:
+
+A rate-limited lookup (HTTP 429) annotates the record RATE_LIMITED
+— a first-class, searchable state, never a silent N/A. The prompt
+tells the LLM the lookup could not be made and to treat the status
+as unknown. Degraded records are NEVER cached, so the very next
+alert re-asks the moment quota recovers; recovery is automatic and
+needs no operator action. The design rationale: hitting a
+reputation-source rate limit during normal operation often means
+elevated external-IP volume, which can itself be the attack signal
+— silently skipping reputation lookups at that exact moment is the
+wrong behavior.
+
+Per-source rate-limit WARNINGs in the journal are controlled by
+each source's rate_limit_warnings toggle. Records are annotated
+either way; the toggle only governs journal noise. Leave warnings
+ON for keyed production sources; turn OFF where quota bounces are
+routine (keyless OTX, free-key VirusTotal).
+
+AUTH FAILURES (where they are observable):
+
+  - VirusTotal: a rejected key (HTTP 401) logs a WARNING once per
+    process and annotates affected lookups AUTH_FAILED — a
+    configuration problem, distinguishable from both "clean" and
+    "rate limited." Fix the key; no restart-loop of errors.
+  - OTX: key validity is NOT observable — the API returns the same
+    public data with a valid key, a bad key, or no key. A mistyped
+    key silently behaves as keyless. Verify at otx.alienvault.com.
+  - GreyNoise/KEV/EPSS: KEV and EPSS have no keys. GreyNoise
+    keyless is a supported mode, not an error.
+
+CISA KEV CATALOG LIFECYCLE:
+
+The KEV catalog is fetched in the background and cached locally
+with a 24h refresh. No alert ever blocks on the download. If the
+CISA feed is unreachable, the cached catalog keeps serving with a
+visible STALE annotation once it ages past 48h, and UNAVAILABLE
+when no catalog has ever been fetched. Both states ship in
+gl2_kev_listed, so verdicts made without fresh KEV context are
+searchable: gl2_kev_listed:STALE OR gl2_kev_listed:UNAVAILABLE.
+
+QUOTA PROFILES (free tiers):
+
+  Source      Free-tier budget          Notes
+  ----------- ------------------------- ---------------------------
+  GreyNoise   ~10 lookups/day keyless   Keyed (commercial/trial)
+                                        for real deployments
+  CISA KEV    unlimited                 one catalog download / 24h
+  EPSS        effectively unlimited     batched per alert
+  VirusTotal  4/min, 500/day            NON-COMMERCIAL license on
+                                        free keys; per_alert_cap
+                                        protects the daily budget
+  OTX         generous; keyless runs    key raises the ceiling
+              at a lower ceiling
+
+  VirusTotal is the tightest budget in the set and the only one
+  where a busy FIM day can visibly exhaust quota — expect
+  RATE_LIMITED annotations on VT lines during registry/file change
+  storms on a free key. This is the cap and the fail-loud contract
+  working as designed, not a fault.
+
+PARTY vs MENTIONED IP FIELDS:
+
+gl2_greynoise_class and gl2_abuse_score describe IPs that are
+PARTIES to the alert (structured source/destination fields).
+External IPs that merely appear in the alert's raw log text ship
+separate worst-of fields — gl2_mentioned_greynoise_worst and
+gl2_mentioned_abuse_max — so a domain controller alert whose log
+contains a resolved malicious IP never pollutes the party fields.
+On hash-bearing alerts (and only those), VT and OTX also run on
+mentioned external IPs — IP reputation corroborating hash intel on
+the same record — rendering on the mentioned line and shipping
+gl2_mentioned_vt_malicious / gl2_mentioned_otx_pulses. Hash-less
+alerts spend no VT/OTX quota on mentioned IPs.
+See graylog_searches.txt for the search patterns.
+
+ENRICHMENT LOOKUPS IN YOUR OWN NETWORK EVIDENCE:
+
+The pipeline's own enrichment traffic is visible to your sensors:
+DNS queries to www.virustotal.com, otx.alienvault.com, and the
+other source endpoints originate from the jrSOCtriage host and
+will appear in Zeek/DNS context windows that overlap enrichment
+activity. If your host inventory notes explain ip-api.com DNS
+noise, extend the same note to the v1.1 source domains so the LLM
+never reads the pipeline's own lookups as a finding.
 
 ============================================================
 STORM MANAGEMENT
@@ -2786,11 +2908,8 @@ What's intentionally still single-threaded:
     choice, not a capacity constraint: v1.0's per-alert write profile
     is already minimal (one fsync per dedup-passing alert), and the
     measured disk-bound ceiling on reference hardware is orders of
-    magnitude above any realistic deployment. The roadmap reduces
-    per-alert disk utilization further over time: v1.3 batches hot-
-    path writes (for hardware lifespan and storm resilience, not
-    capacity); v1.7 moves hot writes to Redis Streams; v2.0 swaps
-    cold history (verdicts, audit log) to PostgreSQL.
+    magnitude above any realistic deployment. v2.0 swaps cold
+    history (verdicts, audit log) to PostgreSQL.
   - alerts.json position tracking — single ingester reads the Wazuh
     file sequentially. No fan-out at this layer, by design.
 
@@ -3522,8 +3641,8 @@ TUNING WORKFLOW
    batch sizes (10,000+) and short poll intervals (5 seconds),
    your raw alert volume has outgrown what v1.0 single-process
    ingest can absorb. Filter more aggressively at the Wazuh layer
-   to reduce what reaches jrSOCtriage, and watch the v1.7 (Redis
-   hot path) and v2.0 (worker pool) roadmap, which address this
+   to reduce what reaches jrSOCtriage, and watch the v2.0
+   (multi-host worker pool) roadmap, which addresses this
    directly.
 
 Secondary signals that batch size may be undersized even at
@@ -3894,12 +4013,12 @@ enrichment.geo_ip.enabled
 
   For deployments that need higher rate limits or HTTPS, ip-api.com
   offers a paid Pro tier (~$13-15/month for 30,000 requests/day with
-  HTTPS). v1.1 will add a config option for an ip-api Pro API key.
-  v1.2 will add a provider abstraction supporting alternate backends
-  (ipapi.co, ipinfo.io, MaxMind GeoLite2 local database).
+  HTTPS). v1.3 adds a provider-agnostic GeoIP backend supporting
+  several online providers and a local MaxMind database, so
+  high-volume operators can avoid rate limits entirely.
 
   For a home lab the free tier is fine. For a production SOC, plan
-  to enable an ip-api Pro key after upgrading to v1.1.
+  on the v1.3 GeoIP backend for higher limits or HTTPS.
 
 enrichment.abuseipdb.enabled
   → true/false. AbuseIPDB reputation lookup for external IPs.
@@ -3910,6 +4029,53 @@ enrichment.abuseipdb.api_key
 enrichment.abuseipdb.score_threshold
   → Scores at or above this value are flagged in the prompt.
   → Default: 25.
+
+enrichment.abuseipdb.rate_limit_warnings
+  → true/false. Log an operator WARNING when an AbuseIPDB lookup is
+  → rate-limited (HTTP 429). The record is annotated RATE_LIMITED
+  → either way; the toggle only controls the journal warning. A 429
+  → during normal operation often means elevated external-IP volume
+  → — which can itself be the attack signal — so leave this on for
+  → keyed production use.
+
+enrichment.greynoise.enabled / .api_key / .skip_private
+                            / .rate_limit_warnings
+  → GreyNoise: is the external source IP mass-scanning the whole
+  → internet, or plausibly targeting this network. Keyless works at
+  → very low volume (~10 lookups/day); real deployments need a
+  → commercial or trial key. Ships gl2_greynoise_class.
+
+enrichment.cisa_kev.enabled
+  → CISA Known Exploited Vulnerabilities check for CVE-bearing
+  → alerts. Free, no key, no rate limit. The catalog is downloaded
+  → in the background and cached locally (24h refresh, non-blocking
+  → — no alert ever waits on the download). Ships gl2_kev_listed.
+
+enrichment.epss.enabled
+  → FIRST.org EPSS exploitation-probability scores for CVE-bearing
+  → alerts. Free, no key. One batched lookup per alert covering all
+  → its CVEs, cached 24h per CVE. Renders beside KEV in the prompt.
+  → Ships gl2_epss_max.
+
+enrichment.virustotal.enabled / .api_key / .per_alert_cap
+                             / .skip_private / .rate_limit_warnings
+  → VirusTotal engine detections for file hashes (FIM/syscheck
+  → alerts, including registry-value hashes) and external IPs. Key
+  → REQUIRED. Free keys are limited to 4 lookups/min and 500/day
+  → and are licensed for NON-COMMERCIAL use only — commercial
+  → deployments need a VT premium key. per_alert_cap (default 4)
+  → bounds lookups per alert so FIM storms cannot burn the daily
+  → quota; over-cap hashes are annotated NOT_CHECKED, never
+  → silently skipped. Ships gl2_vt_malicious.
+
+enrichment.otx.enabled / .api_key / .skip_private
+                       / .rate_limit_warnings
+  → AlienVault OTX community threat reports (pulses) for the
+  → alert's hashes and external IPs. The key is OPTIONAL: keyless
+  → operation is fully supported at a lower rate ceiling. NOTE:
+  → OTX does not confirm key validity on lookups — a mistyped key
+  → silently behaves as keyless; verify your key at
+  → otx.alienvault.com if in doubt. Ships gl2_otx_pulses.
 
 ------------------------------------------------------------
 LLM
@@ -4041,7 +4207,7 @@ PRIMARY (LOCAL):
                   wall-clock per call than a single call does on
                   the same hardware. If you attempt this anyway
                   (e.g. testing scenarios, transient bursts during
-                  v1.1+ surge handling), raise the per-endpoint
+                  v1.2+ surge handling), raise the per-endpoint
                   timeout_seconds proportionally — at --parallel 4
                   with 4 concurrent workers, expect per-call wall-
                   clock latency to grow by roughly 4x and size the
@@ -5438,7 +5604,7 @@ Per-engine handling in jrSOCtriage v1.0:
     refer to that provider's documentation for the reasoning-
     budget parameter and set it independently from max_tokens.
 
-For new engine adapters (v1.1+):
+For new engine adapters (future releases):
   Before merging a new local engine adapter, verify the following
   for each thinking-capable model the adapter will support:
 

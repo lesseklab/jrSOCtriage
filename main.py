@@ -1124,12 +1124,18 @@ def run(config_path="config.json"):
         f"[DIAG] ingest_marker={_DIAG_LOG_INGEST} "
         f"worker_pickup={_DIAG_LOG_PICKUP}"
     )
-    logger.info(
-        f"[DIAG] watchdog_enabled={_DIAG_WATCHDOG_ENABLED} "
-        f"abandon_on_stall={_DIAG_ABANDON_ON_STALL} "
-        f"stall_threshold_s={_DIAG_STALL_THRESHOLD_S} "
-        f"watchdog_interval_s={_DIAG_WATCHDOG_INTERVAL_S}"
-    )
+    # The watchdog [DIAG] line prints only when the watchdog is actually
+    # enabled (2026-07-18, Kevin). Enablement requires the undocumented
+    # diagnostics.stall_watchdog_enabled json setting — anyone who set it
+    # can read this code; everyone else's startup log shouldn't advertise
+    # a dormant, undocumented subsystem.
+    if _DIAG_WATCHDOG_ENABLED:
+        logger.info(
+            f"[DIAG] watchdog_enabled={_DIAG_WATCHDOG_ENABLED} "
+            f"abandon_on_stall={_DIAG_ABANDON_ON_STALL} "
+            f"stall_threshold_s={_DIAG_STALL_THRESHOLD_S} "
+            f"watchdog_interval_s={_DIAG_WATCHDOG_INTERVAL_S}"
+        )
 
     # Custom polling pool, used instead of ThreadPoolExecutor. This is a
     # deliberately minimal worker pool: persistent threads pulling from a

@@ -35,6 +35,32 @@ deployment.security_domain
 SOURCES
 ============================================================
 
+wazuh_api
+  Credentials for the Wazuh API. This is separate from the alert
+  source below — the pipeline reads alerts from alerts.json on disk
+  and never needs the API for triage. The API is used only by the
+  interface's agent import, which pulls your Wazuh agent list so you
+  can populate hosts.json from it instead of typing hosts by hand.
+  Leave the block blank if you do not use agent import; nothing else
+  is affected.
+  url
+    Wazuh API URL including port. Example: https://10.0.0.5:55000
+    HTTPS with a self-signed certificate is the default for a stock
+    Wazuh install.
+  username, password
+    A Wazuh API user — NOT the dashboard login. On the standard
+    Docker stack the API user is "wazuh-wui". A read-only user is
+    sufficient; agent import only reads.
+  dns_server
+    Optional resolver used when verifying imported agents against
+    DNS. Blank uses the system resolver. Set it when your Wazuh
+    agents resolve on an internal DNS server that the jrSOCtriage
+    host does not use by default.
+  verify_ssl
+    false for the self-signed certificate a stock Wazuh install
+    ships with. Set true once you have put a valid certificate on
+    the API.
+
 sources.wazuh
   alerts_file
     Path to Wazuh alerts.json. The primary alert source.
@@ -138,6 +164,33 @@ escalation_multiplier
   of rule level. 4.0 = escalate if today's count exceeds 4x daily
   average. Requires min_baseline_days of data before firing.
 
+max_workers
+  Size of the worker pool — the number of alerts that can be in
+  enrichment and LLM triage at the same time. Default: 1.
+  This is the main throughput knob. Each worker independently runs the
+  full per-alert path (enrichment lookups, Graylog/Zeek/ntopng fetches,
+  the LLM call, shipping), so raising it raises concurrent load on
+  every one of those services as well as on your LLM endpoint. Size it
+  against the slowest thing in that chain, not against CPU: with a
+  single local GPU, more workers than the endpoint's max_concurrent
+  just queues requests.
+  A related bound is derived from it automatically: the pipeline
+  accepts at most 4x max_workers alerts in flight before applying
+  backpressure to ingest. Backpressure is normal under bursts and is
+  visible as backpressure_waits on the [BATCH] log line.
+  Start at 1. Raise it if triage is falling behind ingest during
+  sustained load rather than during isolated bursts.
+
+sensor_agent_names
+  Agent names that identify the sensor host itself rather than a
+  monitored endpoint — by default ["wazuh.manager", "wazuh-manager",
+  "suricata"]. Alerts arriving under these names describe traffic the
+  sensor observed, so attributing them to the sensor's own hostname
+  would be misleading; the pipeline instead resolves the real host from
+  the alert's own IP fields. Add your own sensor's agent name here if
+  it differs, otherwise network alerts will all appear to come from
+  your sensor.
+
 ============================================================
 FILTERING
 ============================================================
@@ -218,6 +271,116 @@ enrichment.abuseipdb
     abuse_escalation_threshold in filtering controls when scores force
     LLM routing.
 
+The five sources below are the v1.1 threat-intelligence additions. All
+ship disabled by default. Each answers one triage question and renders
+its own prompt section with interpretation guidance, and each ships a
+flat Graylog field so you can search on it. None of them generate
+alerts — they annotate alerts that have already fired.
+
+enrichment.cisa_kev
+  enabled
+    Checks each CVE in an alert against CISA's Known Exploited
+    Vulnerabilities catalog — vulnerabilities confirmed to be under
+    active exploitation in the wild. Free, no API key, no rate limit,
+    so there is little reason to leave it off.
+    The catalog is fetched once and refreshed every 24 hours, not
+    per alert. If a refresh fails the previous catalog keeps being
+    served rather than the source going dark.
+    Ships gl2_kev_listed.
+
+enrichment.greynoise
+  enabled
+    Per-IP: separates internet-wide background scanning — the constant
+    hum of mass scanners — from activity aimed specifically at you.
+    Usually the single most verdict-changing signal in the set: a
+    known mass-scanner can be de-prioritized with confidence, while an
+    IP GreyNoise has never seen keeps its full weight.
+    Ships gl2_greynoise_class. Values: riot, benign, malicious,
+    unknown, not_seen, RATE_LIMITED, N/A. not_seen is the interesting
+    one — it means "not mass-scanning", i.e. possibly targeted.
+  api_key
+    Optional but recommended. GreyNoise no longer issues API keys with
+    free accounts, so the practical arrangement is keyless at low
+    volume, or bring a paid key for higher limits and richer context.
+    Keyless works and is a supported mode; expect rate limiting at
+    volume.
+  rate_limit_warnings
+    Default true. Whether HTTP 429 responses are logged as warnings.
+    Leave true when running keyless — the 429 rate tells you whether
+    you have outgrown keyless operation. Set false if the warnings
+    are just noise to you.
+  Results are cached 30 minutes per IP.
+
+enrichment.epss
+  enabled
+    Per-CVE: FIRST.org's Exploit Prediction Scoring System, the modeled
+    probability that a CVE will be exploited in the next 30 days.
+    Free, no API key.
+    Reads alongside CISA KEV rather than instead of it: KEV says a CVE
+    HAS been exploited (confirmed, past), EPSS says how likely it is TO
+    BE (modeled, forward). The two render side by side so they are read
+    together.
+    A CVE absent from the response is a real answer — "not in the EPSS
+    corpus" — not a failure.
+    Ships gl2_epss_max, the highest score among the alert's CVEs.
+    Numeric when present, so it is range-searchable in Graylog.
+    Scores are cached 24 hours per CVE, and all of an alert's CVEs are
+    fetched in one batched call.
+
+enrichment.virustotal
+  enabled
+    Per-indicator (file hash, IP): multi-engine reputation — how many
+    engines flag the indicator as malicious.
+    Ships gl2_vt_malicious. Numeric when present. A checked-clean
+    indicator ships 0 rather than shipping nothing, so you can tell
+    "checked, clean" apart from "never checked" in a search.
+  api_key
+    Required. The free public API is 4 requests/minute, 500/day, and
+    its terms are NON-COMMERCIAL — fine for a home lab, not for a
+    commercial deployment. Commercial use needs a paid VirusTotal
+    key, which uses this same integration and lifts the limits.
+    A rejected key is reported as AUTH_FAILED rather than being
+    silently treated as "no data", so a misconfigured key is visible
+    instead of quietly producing empty enrichment.
+  per_alert_cap
+    Maximum indicators looked up per alert. Default 4, minimum 1.
+    This is the quota control: an alert carrying a dozen hashes would
+    otherwise burn a noticeable fraction of a 500/day allowance on one
+    alert. Raise it only if you are on a paid key.
+  rate_limit_warnings
+    Default false. Whether HTTP 429 responses are logged as warnings.
+    Off by default because on the free tier, hitting 4/minute is
+    expected operation rather than a fault.
+  Hash results are cached 24 hours, IP results 30 minutes.
+
+enrichment.otx
+  enabled
+    Per-indicator lookup against AlienVault Open Threat Exchange —
+    which community-published pulses an indicator appears in, and the
+    campaigns or adversary techniques those pulses describe. This is
+    the indicator-lookup endpoint, not the bulk pulse feed.
+    Most useful on the analyst-facing side: it helps a human work out
+    WHAT an indicator might belong to, more than it changes a verdict.
+    Ships gl2_otx_pulses, the pulse count. Ships 0 for checked-clean.
+  api_key
+    Required. Free with an OTX account.
+    Note a quirk worth knowing when troubleshooting: OTX returns HTTP
+    200 with ordinary public data even for an invalid key, so key
+    validity cannot be detected from the indicator endpoints. If OTX
+    results look implausibly empty, verify the key against OTX's own
+    site rather than expecting the pipeline to flag it.
+    Well-known infrastructure is whitelisted upstream by OTX — 8.8.8.8
+    legitimately returns 0 pulses. Zero is usually a real answer, not
+    a broken lookup.
+  rate_limit_warnings
+    Default false. Whether HTTP 429 responses are logged as warnings.
+  Hash results are cached 24 hours, IP results 30 minutes.
+
+A note on all five: each also has a "mentioned" counterpart field for
+indicators found in an alert's log text rather than in its structured
+fields — gl2_mentioned_greynoise_worst, gl2_mentioned_vt_malicious,
+gl2_mentioned_otx_pulses. See graylog_searches.txt for query examples.
+
 ============================================================
 LLM
 ============================================================
@@ -288,6 +451,18 @@ email.smtp_port
 
 email.use_tls
   true for port 587 with STARTTLS.
+  Legacy flag, kept working for existing configs. It is only consulted
+  when smtp_security is absent: true maps to starttls, false to none.
+  If you set smtp_security, that wins and this is ignored.
+
+email.smtp_security
+  Connection security mode. Preferred over use_tls. One of:
+  "starttls" — connect in plaintext, then upgrade. Port 587. Default.
+  "ssl"      — implicit TLS from the first byte. Port 465.
+  "none"     — no transport encryption. Internal relays only.
+  An unrecognised value is an error and the send is refused rather
+  than silently downgraded — check the log if mail stops going out
+  after editing this.
 
 email.username
   Full email address of the sending account.
@@ -316,6 +491,11 @@ email.subject_prefix_notify
 email.subject_prefix_note
   Email subject prefix for NOTE verdicts. Default: [jrSOC NOTE]
   Use mail filters keyed on this prefix to route to a Notes folder.
+
+email.subject_prefix
+  Legacy single-prefix key, kept for older configs. Used only as the
+  fallback for NOTIFY when subject_prefix_notify is absent; it has no
+  effect on NOTE subjects. Prefer the two explicit keys above.
 
 email.min_confidence_to_email
   Minimum confidence for NOTIFY verdicts to generate email.
@@ -480,6 +660,20 @@ logging.level
   log volume substantially. Changes take effect after a service
   restart.
 
+observability.lag_log_interval_seconds
+  How often the [LAG] snapshot line is emitted, in seconds.
+  Default: 30. 0 disables emission entirely.
+  This only controls the cadence. [LAG] is DEBUG-level output, so it
+  does not appear at all unless logging.level is "debug" — setting an
+  interval here while the level is "info" produces nothing. Enable
+  debug first, then tune this if the default cadence is too coarse or
+  too chatty for what you are chasing.
+  Treat [LAG] as suggestive rather than authoritative. It is a
+  sampled snapshot: a queue that has aged past a threshold shows up
+  as stall_state=suspect, which is usually just a burst draining
+  normally. The trustworthy signal for lost work is the shutdown
+  ledger's abandoned count, not this line.
+
 ============================================================
 TIMEZONE
 ============================================================
@@ -521,9 +715,44 @@ paths.zeek_archive_dir
   Path to Zeek's archive directory. Used by maintenance.py for
   rotation cleanup. Optional.
 
+paths.users_file
+  Path to users.json. Optional; default users.json beside the install.
+  Holds the username-to-alias map used by anonymization. Aliases are
+  minted on first sight of a username and persisted here so the same
+  user maps to the same alias across restarts — which is what keeps
+  an anonymized prompt readable to the LLM as a consistent actor
+  rather than a new stranger each time.
+
+paths.domain_file
+  Path to domain.json. Optional; default domain.json beside the
+  install. Same mechanism as users_file, for domain names.
+
+paths.anonymization_file
+  Path to anonymization.json. Optional. Holds the anonymization
+  settings themselves — which categories are anonymized and the
+  subnet mappings. Only consulted when a cloud LLM endpoint has
+  anonymization turned on.
+
+paths.ip_aliases_file
+  Path to ip_aliases.json. Optional; default ip_aliases.json beside
+  the install. Persists IP-to-alias mappings for anonymization, kept
+  structurally faithful — an aliased address preserves its subnet
+  relationships so the LLM can still reason about "same subnet as"
+  without seeing your real addressing.
+
 ============================================================
 PROMPT CUSTOMIZATION
 ============================================================
+
+prompt_customization.strip_redundant_fields
+  Whether the alert is abridged before being rendered into the prompt
+  (default true). Wazuh alerts carry a lot of fields that are either
+  duplicated elsewhere in the prompt or carry no triage value; with
+  this on, those are dropped so the model sees a shorter, denser
+  alert. Set false to send the alert essentially intact — useful when
+  you suspect a stripped field mattered to a verdict, and worth
+  turning back on afterward, since longer prompts cost more per call
+  on metered endpoints and give the model more to wade through.
 
 prompt_customization.sensor_context
   List of strings added to the SENSOR CONTEXT block of every LLM

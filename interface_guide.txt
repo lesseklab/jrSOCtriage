@@ -99,14 +99,15 @@ CONFIG
 
 The main configuration tab. Edits config.json.
 
-Sections (top to bottom):
+The Config tab is split into two sub-tabs: "Source & Enrich" and
+"Processing, LLM & Etc." On opening the tab, neither sub-tab is
+selected — pick one to show its cards. The choice is deliberately not
+remembered between visits. The split is display-only: fields on BOTH
+sub-tabs belong to the same config.json and the Save Config button
+saves everything together, whichever sub-tab is showing. The core
+workflow (edit, save, verify, restart) is unchanged.
 
-  Deployment      - Deployment identity, stamped onto every shipped
-                    Graylog record as jrsoc_org and jrsoc_security_domain.
-                    Two optional fields: the organization being monitored,
-                    and the part of it (site/division/segment). Lets
-                    multiple orgs or domains on one shared Graylog filter
-                    their own alerts. Leave blank for a single-org lab.
+SOURCE & ENRICH sub-tab (top to bottom):
 
   Data Sources    - Where jrSOCtriage reads alerts, flows, and
                     context from. Configure only what you have
@@ -131,14 +132,140 @@ Sections (top to bottom):
                       - ntopng: endpoint, interface ID (ifid),
                         and auth for L7 active flow enrichment.
 
+  Enrichment      - External data sources that add context to
+                    alerts before the LLM sees them. All safe to
+                    disable if not needed. Classic sources:
+                      - Host inventory lookup (uses hosts.json).
+                      - Network CIDR lookup.
+                      - GeoIP (ip-api.com) - free, no auth.
+                      - WHOIS - for external IPs.
+                      - Reverse DNS - for external IPs.
+                      - AbuseIPDB - reputation scoring. Requires
+                        free API key from abuseipdb.com. Score
+                        threshold here is the annotation threshold
+                        (when to highlight in the prompt);
+                        Filtering tab has the escalation threshold.
+
+                    Threat-intelligence sources (v1.1). Each card's
+                    hint text carries the full behavior description;
+                    the short version:
+                      - GreyNoise - is the source IP mass-scanning
+                        the whole internet, or plausibly targeting
+                        you. Keyless works at very low volume;
+                        real deployments need a key.
+                      - CISA KEV - is the alert's CVE confirmed
+                        actively exploited in the wild. Free, no
+                        key; catalog cached locally.
+                      - EPSS - modeled probability the CVE will be
+                        exploited within 30 days. Free, no key.
+                        Renders beside KEV in the prompt.
+                      - VirusTotal - antivirus engine detections
+                        for FIM file hashes and external IPs.
+                        Free-key quota is protected by the
+                        per-alert lookup cap (leave at 4 on a free
+                        key; note free keys are licensed
+                        non-commercial only).
+                      - AlienVault OTX - community threat reports
+                        referencing the alert's hashes or IPs.
+                        Works keyless at a lower rate ceiling.
+
+                    Every source has an independent Enabled toggle
+                    (plus Skip private IPs where IP-based). The
+                    reputation sources also have a Rate-limit
+                    warnings toggle: rate-limited lookups are
+                    always annotated RATE_LIMITED in the record;
+                    the toggle only controls whether an operator
+                    WARNING is also logged. Each v1.1 source ships
+                    a flat gl2_* field for Graylog — see
+                    graylog_searches.txt, "THREAT INTELLIGENCE
+                    SEARCHES."
+
+  Email           - SMTP server, credentials, NOTIFY destination,
+                    optional separate NOTE destination, subject
+                    prefixes, and minimum confidence levels.
+
+  Paths           - File paths for all jrSOCtriage data files.
+                    Click Generate Paths to auto-populate based on
+                    where interface.py is running. The database runs
+                    on local disk by default and needs no special
+                    storage at any realistic volume; an optional
+                    tmpfs (RAM-disk) setup is available if you want
+                    to reduce drive wear or offload a heavily-shared
+                    drive — see running_instructions.txt section
+                    "HOSTING jrsoc.db IN RAM."
+
+  Prompt Customization - Sensor context, triage guidance, and
+                    network notes. One item per line. These are
+                    injected into every LLM prompt.
+
+  Database        - Master switch for database-backed features.
+                    When OFF, jrSOCtriage runs fully stateless: no
+                    DB writes (no alert history or escalation log)
+                    and DB reads fail open (no baseline frequency
+                    context; rule rate-limiting and maintenance-mode
+                    suppression disabled). In-memory dedup is
+                    unaffected — core noise suppression still works.
+                    For high-volume deployments that want DB write
+                    pressure removed as a reliability variable.
+
+  Logging         - How the LLM prompt is recorded in Graylog.
+                    This is an OUTPUT/visibility setting — it does
+                    NOT change what is sent to the cloud LLM (which
+                    is always anonymized when anonymization is
+                    enabled). Saves with Save Config like the rest
+                    of the tab.
+
+                    Prompt Log Mode — what to ship to the
+                    gl2_llm_prompt field:
+                      "Deanonymized" (recommended for most) - the
+                        logged prompt shows REAL hostnames/IPs/
+                        subnets, so it is readable when
+                        investigating an alert.
+                      "Anonymized" - the logged prompt shows FAKE
+                        values, matching exactly what was sent to
+                        the API. Choose this only if you must be
+                        able to prove that real identifiers were
+                        never written to your SIEM at all — e.g. a
+                        privacy/compliance audit context (HIPAA).
+                      "None" - do not ship the prompt field to
+                        Graylog at all.
+                    NOTE: this affects ONLY the gl2_llm_prompt
+                    field. The LLM response fields (summary,
+                    reasoning, verdict) and email are ALWAYS
+                    deanonymized regardless of this setting.
+
+                    Debug LLM Payload (toggle) - logs the full
+                    prompt sent and the raw response received
+                    (before deanon) to the system journal at
+                    WARNING level. The mode-independent way to
+                    VERIFY anonymization — it shows exactly what
+                    went to the cloud API. Cloud-only (never logs
+                    local-endpoint prompts). Produces large log
+                    volume — turn it OFF when not actively
+                    verifying. To read it:
+                      journalctl -u jrsoctriage --no-pager | \
+                        grep -A30 "Exact prompt being sent"
+
+PROCESSING, LLM & ETC. sub-tab (top to bottom):
+
+  Deployment      - Deployment identity, stamped onto every shipped
+                    Graylog record as jrsoc_org and jrsoc_security_domain.
+                    Two optional fields: the organization being monitored,
+                    and the part of it (site/division/segment). Lets
+                    multiple orgs or domains on one shared Graylog filter
+                    their own alerts. Leave blank for a single-org lab.
+
   Timezone        - Local TZ offset and name. Used to convert
                     Zeek UTC timestamps to local time when
                     building context windows.
 
-  Processing      - How often to poll for alerts, max batch size,
-                    dedup silence window, baseline multipliers,
-                    and max workers. These control volume and
-                    timing.
+  Processing      - How often to poll for alerts, dedup silence
+                    window, max batch size, baseline multiplier,
+                    minimum baseline days, and escalation
+                    multiplier. These control volume and timing.
+                    Min Baseline Days accepts 0, meaning no
+                    baseline history is required before frequency
+                    escalation can fire.
 
   Filtering       - Minimum Wazuh rule level sent to the LLM,
                     AbuseIPDB score threshold for escalation,
@@ -163,24 +290,6 @@ Sections (top to bottom):
                     Always Include Hosts - one hostname per line.
                     Same as Always Include Networks but per-host.
 
-  Enrichment      - External data sources that add context to
-                    alerts before the LLM sees them. All safe to
-                    disable if not needed.
-                      - Host inventory lookup (uses hosts.json).
-                      - Network CIDR lookup.
-                      - Include full alert JSON in prompt.
-                      - GeoIP (ip-api.com) - free, no auth.
-                      - WHOIS - for external IPs.
-                      - Reverse DNS - for external IPs.
-                      - AbuseIPDB - reputation scoring. Requires
-                        free API key from abuseipdb.com. Score
-                        threshold here is the annotation threshold
-                        (when to highlight in the prompt);
-                        Filtering tab has the escalation threshold.
-
-                    Each enrichment has an independent enable/
-                    skip_private toggle.
-
   LLM Endpoints   - Add, remove, enable/disable LLM endpoints.
                     Each endpoint has a type (Ollama, Gemini, OpenAI,
                     Anthropic, llamacpp), model string, and connection
@@ -189,29 +298,6 @@ Sections (top to bottom):
 
                     Max LLM Workers controls concurrent calls across
                     all endpoints. Max Concurrent is per-endpoint.
-
-  Email           - SMTP server, credentials, NOTIFY destination,
-                    optional separate NOTE destination, subject
-                    prefixes, and minimum confidence levels.
-
-  Paths           - File paths for all jrSOCtriage data files.
-                    Click Generate Paths to auto-populate based on
-                    where interface.py is running. The database runs
-                    on local disk by default and needs no special
-                    storage at any realistic volume; an optional
-                    tmpfs (RAM-disk) setup is available if you want
-                    to reduce drive wear or offload a heavily-shared
-                    drive — see running_instructions.txt section
-                    "HOSTING jrsoc.db IN RAM."
-
-  Prompt Customization - Sensor context, triage guidance, and
-                    network notes. One item per line. These are
-                    injected into every LLM prompt.
-
-  (Prompt Log Mode and Debug LLM Payload, which control how the LLM
-   prompt is recorded in Graylog, have MOVED to the ANONYMIZATION tab
-   — they are anonymization-visibility settings. See the ANONYMIZATION
-   section below, "Graylog Prompt Logging" card.)
 
   Observability   - Pipeline-health telemetry and debug controls.
                     The card holds a Debug subsection containing
@@ -265,14 +351,13 @@ Sections (top to bottom):
                     section "PIPELINE OBSERVABILITY (LAG LOGGING)"
                     for full field-by-field interpretation.
 
-                    Note: "Debug LLM payload" (now on the
-                    ANONYMIZATION tab, in the "Graylog Prompt Logging"
-                    card) is a SEPARATE debug feature for
-                    anonymization verification — it logs full LLM
-                    prompts and raw responses for PII-scrubbing
-                    audit. Not part of this Debug subsection; it
-                    has a different purpose, audience, and log-
-                    volume profile.
+                    Note: "Debug LLM payload" (on the Logging card,
+                    Source & Enrich sub-tab) is a SEPARATE debug
+                    feature for anonymization verification — it logs
+                    full LLM prompts and raw responses for
+                    PII-scrubbing audit. Not part of this Debug
+                    subsection; it has a different purpose, audience,
+                    and log-volume profile.
 
 Save: "Save Config" button at the bottom.
 Load Defaults: Populates every field with sensible defaults (does
@@ -731,41 +816,11 @@ The tab is divided into cards:
                       network you use is listed in Networks. See the
                       NETWORKS section below.
 
-  Graylog Prompt    - Controls how the LLM prompt is recorded in
-  Logging             Graylog. This is an OUTPUT/visibility setting —
-                      it does NOT change what is sent to the cloud LLM
-                      (which is always anonymized when anonymization is
-                      enabled). It has its own Save button.
-
-                      Prompt Log Mode — what to ship to the
-                      gl2_llm_prompt field:
-                        "Deanonymized" (recommended for most) - the
-                          logged prompt shows REAL hostnames/IPs/
-                          subnets, so it is readable when investigating
-                          an alert.
-                        "Anonymized" - the logged prompt shows FAKE
-                          values, matching exactly what was sent to the
-                          API. Choose this only if you must be able to
-                          prove that real identifiers were never written
-                          to your SIEM at all — e.g. a privacy/compliance
-                          audit context (HIPAA, etc.).
-                        "None" - do not ship the prompt field to
-                          Graylog at all.
-                      NOTE: this affects ONLY the gl2_llm_prompt field.
-                      The LLM response fields (summary, reasoning,
-                      verdict) and email are ALWAYS deanonymized
-                      regardless of this setting.
-
-                      Debug LLM Payload (toggle) - logs the full prompt
-                      sent and the raw response received (before deanon)
-                      to the system journal at WARNING level. This is
-                      the mode-independent way to VERIFY anonymization —
-                      it shows exactly what went to the cloud API. Cloud-
-                      only (never logs local-endpoint prompts). Produces
-                      large log volume — turn it OFF when not actively
-                      verifying. To read it:
-                        journalctl -u jrsoctriage --no-pager | \
-                          grep -A30 "Exact prompt being sent"
+  (Prompt logging settings — Prompt Log Mode and Debug LLM Payload —
+   live on the CONFIG tab, Logging card, Source & Enrich sub-tab.
+   They are documented there. They control only how prompts appear
+   in Graylog and the journal; anonymization of what is actually
+   sent to cloud endpoints is governed by the settings above.)
 
   Users             - REAL → ALIAS mappings for usernames seen in
                       alerts. Auto-populates as new users are seen.

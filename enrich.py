@@ -163,6 +163,55 @@ _geoip_cache_lock = threading.Lock()
 _GEOIP_TTL_S = 86400      # 24h
 _GEOIP_MAX = 4096
 
+# GreyNoise (v1.1): categorical noise/riot classification per IP. Same
+# TTL as abuse — classifications move on a similar reputation timescale.
+# not_seen results (404, or a 200 noise:false miss) ARE cached: "not
+# observed scanning the internet" is an answer, not a failure.
+# RATE_LIMITED and unavailable results are never cached (self-healing
+# the moment quota/key recovers).
+_greynoise_cache = OrderedDict()   # insertion order == age order
+_greynoise_cache_lock = threading.Lock()
+_GREYNOISE_TTL_S = 1800
+_GREYNOISE_MAX = 1024
+
+# EPSS (v1.1): per-CVE exploitation-probability scores. 24h TTL matches
+# the daily publication cadence (EPSS v4 scores new CVEs within ~24h of
+# NVD publication, so the TTL also naturally picks up newly-scored
+# CVEs). Scored AND not-scored results are cached — "checked, not in
+# the corpus" is an answer. RATE_LIMITED and unavailable results are
+# never cached (self-healing).
+_epss_cache = OrderedDict()        # insertion order == age order
+_epss_cache_lock = threading.Lock()
+_EPSS_TTL_S = 86400
+_EPSS_MAX = 2048
+
+# VirusTotal (v1.1): per-indicator engine-detection lookups. One cache,
+# two TTLs by indicator kind: hash verdicts move slowly and every cache
+# hit is free-tier quota saved (24h); IP reputation moves on the same
+# cadence as abuse/greynoise (30min). hit/clean/not_known are all
+# cached — "known clean" and "never submitted" are answers.
+# RATE_LIMITED and unavailable results are never cached (self-healing).
+_vt_cache = OrderedDict()          # insertion order == age order
+_vt_cache_lock = threading.Lock()
+_VT_HASH_TTL_S = 86400
+_VT_IP_TTL_S = 1800
+_VT_MAX = 2048
+
+# AlienVault OTX (v1.1): per-indicator community-pulse lookups. Same
+# kind-keyed one-cache/two-TTLs shape as VT: pulse membership on a hash
+# moves slowly (24h); IP infrastructure gets referenced and ages on the
+# reputation cadence (30min). referenced AND no_reports are both
+# cached — "checked, no community reports" is an answer, and per live
+# verification 2026-07-17 the API cannot distinguish an unknown
+# indicator from a known-but-unreferenced one (both return 200 with
+# pulse count 0), so both are honestly no_reports. RATE_LIMITED and
+# unavailable results are never cached (self-healing).
+_otx_cache = OrderedDict()         # insertion order == age order
+_otx_cache_lock = threading.Lock()
+_OTX_HASH_TTL_S = 86400
+_OTX_IP_TTL_S = 1800
+_OTX_MAX = 2048
+
 def _cache_get(cache, lock, key, ttl):
     now = time.time()
     with lock:
@@ -859,6 +908,23 @@ def abuseipdb_lookup(ip_str, api_key):
             params={"ipAddress": ip_str, "maxAgeInDays": 90},
             timeout=1
         )
+        # Fail-loud rate-limit handling (v1.1). A 429 body has no "data"
+        # key, so before this check it fell through the lookup_miss branch
+        # below — silently indistinguishable from "AbuseIPDB has no data on
+        # this IP". Detect it explicitly: warn the operator (per lookup,
+        # with the IP that went unchecked — on the free tier a rate limit
+        # at homelab volume likely means an attack in progress, so each
+        # line is signal, and lookups are NEVER suppressed or backed off
+        # for the same reason), and return a sentinel the caller turns
+        # into a RATE_LIMITED record annotation. The sentinel is not
+        # cached: rate-limited is state, not data.
+        if resp.status_code == 429:
+            perf_diag.cache("abuse", "rate_limited")
+            logger.warning(
+                f"AbuseIPDB rate-limited (HTTP 429) - reputation lookup "
+                f"skipped for {ip_str}; record annotated RATE_LIMITED"
+            )
+            return {"rate_limited": True}
         data = resp.json().get("data", {})
         if "abuseConfidenceScore" not in data:
             perf_diag.cache("abuse", "lookup_miss")
@@ -878,13 +944,185 @@ def abuseipdb_lookup(ip_str, api_key):
     return {}
 
 
-def enrich_external_ip(ip_str, config):
+GREYNOISE_URL = "https://api.greynoise.io/v3/community/"
+
+# 401 warns once per process, not per lookup — a bad key at alert rate
+# would otherwise spam the log. Plain module flag: the check-then-set
+# race under free-threading can at worst double-log the warning, which
+# is harmless and not worth a lock on the hot path.
+_greynoise_401_warned = False
+
+
+def greynoise_lookup(ip_str, api_key, warn_on_429=True):
+    """
+    GreyNoise Community lookup: is this IP known internet-wide
+    mass-scanning / a known benign business service (RIOT), or has
+    GreyNoise NOT seen it scanning at all?
+
+    Returns one of:
+      {"class": "riot", ["name"]}                 known benign business
+                                                  service (KEYED only)
+      {"class": "benign"|"malicious"|"unknown",   observed mass scanner;
+       ["name"], ["last_seen"]}                   class from the API's
+                                                  classification field
+      {"class": "not_seen"}                       NOT observed scanning —
+                                                  a real answer (404 or a
+                                                  200 miss), the
+                                                  targeted-activity signal
+      {"rate_limited": True}                      429 — caller annotates
+                                                  RATE_LIMITED
+      {}                                          unavailable (401 /
+                                                  timeout / error)
+
+    Keyless operation (empty api_key) is a supported tier: the endpoint
+    answers unauthenticated at very low volume (~10 lookups/day; free
+    accounts no longer receive API keys). The keyless tier STRIPS RIOT
+    data — canonical RIOT IPs return riot:false keyless (verified live
+    2026-07-14) — so keyless riot:false is meaningless and the riot
+    field is never read without a key: RIOT status is UNKNOWN keyless,
+    not false. Riot classification renders keyed only.
+
+    Timeout 1s (locked): supplementary reputation signal — a slow answer
+    is worth less than a fast pipeline. No backoff/retry on 429 (locked).
+    """
+    global _greynoise_401_warned
+    if _safe_ip(ip_str) is None:
+        perf_diag.cache("greynoise", "invalid")
+        return {}
+    found, cached = _cache_get(_greynoise_cache, _greynoise_cache_lock,
+                               ip_str, _GREYNOISE_TTL_S)
+    if found:
+        perf_diag.cache("greynoise", "cache_hit")
+        return dict(cached)
+    perf_diag.cache("greynoise", "cache_miss")
+    headers = {"Accept": "application/json"}
+    if api_key:
+        # Header only when keyed — an empty key header is not the same
+        # as no header on this endpoint (unauthenticated tier).
+        headers["key"] = api_key
+    try:
+        resp = requests.get(GREYNOISE_URL + ip_str, headers=headers,
+                            timeout=1)
+
+        if resp.status_code == 404:
+            # A real answer, NOT an error: GreyNoise has not observed
+            # this IP scanning the internet — activity against this
+            # network is plausibly targeted. Cached: it is data.
+            perf_diag.cache("greynoise", "not_seen")
+            result = {"class": "not_seen"}
+            _cache_put(_greynoise_cache, _greynoise_cache_lock, ip_str,
+                       result, _GREYNOISE_MAX)
+            return dict(result)
+
+        if resp.status_code == 429:
+            perf_diag.cache("greynoise", "rate_limited")
+            # Warning gated by enrichment.greynoise.rate_limit_warnings
+            # (caller passes it): with a commercial key, a 429 during
+            # normal ops signals elevated external-IP volume — warn
+            # loud, per lookup, with the IP that went unchecked (the
+            # AbuseIPDB fail-loud template). Keyless at ~10/day, 429 is
+            # routine — operators disable the warning; the RATE_LIMITED
+            # record annotation ships regardless. No backoff, never
+            # cached: rate-limited is state, not data.
+            if warn_on_429:
+                logger.warning(
+                    f"GreyNoise rate-limited (HTTP 429) - noise lookup "
+                    f"skipped for {ip_str}; record annotated RATE_LIMITED"
+                )
+            return {"rate_limited": True}
+
+        if resp.status_code == 401:
+            perf_diag.cache("greynoise", "unauthorized")
+            if not _greynoise_401_warned:
+                _greynoise_401_warned = True
+                logger.warning(
+                    "GreyNoise API key rejected (HTTP 401) - noise "
+                    "lookups unavailable until the key is fixed "
+                    "(warned once per process)")
+            return {}
+
+        if resp.status_code != 200:
+            perf_diag.cache("greynoise", "error")
+            return {}
+
+        data = resp.json()
+
+        # RIOT — keyed only. The keyless tier strips RIOT data (see
+        # docstring), so the field is only meaningful with a key.
+        if api_key and data.get("riot"):
+            perf_diag.cache("greynoise", "riot")
+            result = {"class": "riot"}
+            name = _truncate(str(data.get("name") or ""), 100)
+            if name:
+                result["name"] = name
+            _cache_put(_greynoise_cache, _greynoise_cache_lock, ip_str,
+                       result, _GREYNOISE_MAX)
+            return dict(result)
+
+        if data.get("noise"):
+            # Observed mass scanner. Full fields ship on hits in BOTH
+            # tiers (verified live keyless 2026-07-14 on Stretchoid:
+            # classification/name/last_seen all present). Class is
+            # clamped to the API's three values so a future API
+            # addition can't leak an unexpected string into GELF.
+            classification = str(data.get("classification")
+                                 or "unknown").lower()
+            if classification not in ("benign", "malicious", "unknown"):
+                classification = "unknown"
+            perf_diag.cache("greynoise", "noise")
+            result = {"class": classification}
+            name = _truncate(str(data.get("name") or ""), 100)
+            if name:
+                result["name"] = name
+            last_seen = _truncate(str(data.get("last_seen") or ""), 32)
+            if last_seen:
+                result["last_seen"] = last_seen
+            _cache_put(_greynoise_cache, _greynoise_cache_lock, ip_str,
+                       result, _GREYNOISE_MAX)
+            return dict(result)
+
+        # 200 with noise:false (and no usable riot) — same semantics as
+        # 404: not observed scanning. This is the keyless miss shape
+        # verified live (bare {ip, noise:false, riot:false, message}).
+        perf_diag.cache("greynoise", "not_seen")
+        result = {"class": "not_seen"}
+        _cache_put(_greynoise_cache, _greynoise_cache_lock, ip_str,
+                   result, _GREYNOISE_MAX)
+        return dict(result)
+    except (requests.RequestException, ValueError):
+        perf_diag.cache("greynoise", "error")
+    # Transient failures are NOT cached — same rule as abuse.
+    return {}
+
+
+def _record_degraded(record):
+    """True when an enrichment record carries a rate-limit annotation.
+
+    Degraded records are NOT stored in _ip_enrichment_cache (same principle
+    as the abuse cache's failures-are-not-cached rule: rate-limited is
+    state, not data). Every subsequent alert touching the IP re-runs
+    enrichment - nearly free, since rdns/whois/geoip hit their own 24h
+    caches - and the moment quota recovers, the next lookup produces a
+    clean record which caches normally. Self-healing, no stale RATE_LIMITED
+    annotations. Checks values generically so the v1.1 enrichment sources
+    inherit the behavior by using the same annotation string. AUTH_FAILED
+    (added with VirusTotal, 2026-07-16) is equally cache-excluding: a
+    fixed API key must take effect on the next alert, not after a cache
+    TTL."""
+    return any(v in ("RATE_LIMITED", "AUTH_FAILED")
+               for v in record.values())
+
+
+def enrich_external_ip(ip_str, config, include_vt_otx=True):
     """
     Run all external enrichment for one IP.
     Returns a dict of everything we found.
     """
     enrichment_cfg = config.get("enrichment", {})
     abuseipdb_cfg  = enrichment_cfg.get("abuseipdb", {})
+    greynoise_cfg  = enrichment_cfg.get("greynoise", {})
+    virustotal_cfg = enrichment_cfg.get("virustotal", {})
+    otx_cfg        = enrichment_cfg.get("otx", {})
 
     result = {"ip": ip_str}
 
@@ -904,10 +1142,791 @@ def enrich_external_ip(ip_str, config):
 
     if abuseipdb_cfg.get("enabled", False):
         abuse = abuseipdb_lookup(ip_str, abuseipdb_cfg.get("api_key", ""))
-        result["abuse_score"]   = abuse.get("abuse_score", "N/A")
-        result["total_reports"] = abuse.get("total_reports", "N/A")
+        if abuse.get("rate_limited"):
+            # Warranted lookup (enabled, keyed, valid IP, cache miss) hit
+            # the API rate limit. Annotate rather than N/A so the prompt,
+            # GELF (gl2_abuse_score:RATE_LIMITED is searchable), and the
+            # operator can all distinguish "no data" from "couldn't ask".
+            result["abuse_score"]   = "RATE_LIMITED"
+            result["total_reports"] = "RATE_LIMITED"
+        else:
+            result["abuse_score"]   = abuse.get("abuse_score", "N/A")
+            result["total_reports"] = abuse.get("total_reports", "N/A")
+
+    if greynoise_cfg.get("enabled", False):
+        gn = greynoise_lookup(
+            ip_str,
+            greynoise_cfg.get("api_key", ""),
+            warn_on_429=greynoise_cfg.get("rate_limit_warnings", True),
+        )
+        if gn.get("rate_limited"):
+            # Same fail-loud contract as AbuseIPDB: annotate rather than
+            # N/A so the prompt, GELF (gl2_greynoise_class:RATE_LIMITED
+            # is searchable), and the operator can all distinguish "no
+            # data" from "couldn't ask". _record_degraded keys on this
+            # exact string, keeping the whole record out of the
+            # enrichment cache so the next alert re-asks.
+            result["greynoise_class"] = "RATE_LIMITED"
+        elif gn:
+            result["greynoise_class"] = gn.get("class", "N/A")
+            if gn.get("name"):
+                result["greynoise_name"] = gn["name"]
+            if gn.get("last_seen"):
+                result["greynoise_last_seen"] = gn["last_seen"]
+        else:
+            # Unavailable (401 / timeout / transient error) — noise
+            # status is unknown, not a classification.
+            result["greynoise_class"] = "N/A"
+
+    if include_vt_otx:
+        result.update(_vt_otx_ip_fields(ip_str, config))
 
     return result
+
+
+def _needs_vt_otx_upgrade(rec, config):
+    """
+    True when a cached IP record predates (or was built without) the
+    hash-gated VT/OTX fields that the current consumer needs: the
+    record lacks a state field for an enabled source. Disabled sources
+    never require an upgrade.
+    """
+    enr = config.get("enrichment", {})
+    vt_cfg = enr.get("virustotal", {})
+    if vt_cfg.get("enabled", False) and vt_cfg.get("api_key") \
+            and "vt_state" not in rec:
+        return True
+    otx_cfg = enr.get("otx", {})
+    if otx_cfg.get("enabled", False) and "otx_state" not in rec:
+        return True
+    return False
+
+
+def _vt_otx_ip_fields(ip_str, config):
+    """
+    The VT-IP and OTX-IP lookups, factored out of enrich_external_ip
+    so they can be (a) skipped for mentioned IPs on hash-less alerts
+    — per the 2026-07-18 decision, mentioned-IP VT/OTX reputation is
+    only decision-relevant when the alert also carries a hash change,
+    so hash-less alerts spend no VT/OTX quota on regex-found IPs —
+    and (b) run standalone to UPGRADE a cached lite record when a
+    party consumer (or a hash-bearing mention) later needs the
+    fields. Returns the field dict to merge into the IP record.
+    """
+    result = {}
+    enrichment_cfg = config.get("enrichment", {})
+    virustotal_cfg = enrichment_cfg.get("virustotal", {})
+    otx_cfg        = enrichment_cfg.get("otx", {})
+
+    if virustotal_cfg.get("enabled", False) and virustotal_cfg.get("api_key"):
+        vt = vt_lookup(ip_str, "ip", virustotal_cfg.get("api_key", ""),
+                       warn_on_429=virustotal_cfg.get(
+                           "rate_limit_warnings", False))
+        state = vt.get("state")
+        if state == "RATE_LIMITED":
+            # Same fail-loud contract as AbuseIPDB/GreyNoise:
+            # _record_degraded keys on this exact string, keeping the
+            # record out of the enrichment cache so the next alert
+            # re-asks. IP lookups are NOT counted against the per-alert
+            # hash cap — they're bounded by the alert's external-IP
+            # count and this per-IP record cache instead (a cross-
+            # function budget would interact incoherently with cached
+            # records that carry vt fields without spending anything).
+            result["vt_state"] = "RATE_LIMITED"
+        elif state:
+            result["vt_state"] = state
+            if state in ("hit", "clean"):
+                result["vt_malicious"] = vt.get("malicious", 0)
+                result["vt_total"]     = vt.get("total", 0)
+            if vt.get("label"):
+                result["vt_label"] = vt["label"]
+        else:
+            result["vt_state"] = "N/A"
+
+    if otx_cfg.get("enabled", False):
+        # Key NOT required — keyless runs at the lower public ceiling
+        # (GreyNoise model; see otx_lookup docstring).
+        ox = otx_lookup(ip_str, "ip", otx_cfg.get("api_key", ""),
+                        warn_on_429=otx_cfg.get(
+                            "rate_limit_warnings", False))
+        state = ox.get("state")
+        if state == "RATE_LIMITED":
+            # Same fail-loud contract as AbuseIPDB/GreyNoise/VT:
+            # _record_degraded keys on this exact string, keeping the
+            # record out of the enrichment cache so the next alert
+            # re-asks the moment quota recovers.
+            result["otx_state"] = "RATE_LIMITED"
+        elif state:
+            result["otx_state"] = state
+            if state == "referenced":
+                result["otx_pulses"] = ox.get("pulses", 0)
+                if ox.get("latest"):
+                    result["otx_latest"] = ox["latest"]
+                if ox.get("names"):
+                    result["otx_names"] = ox["names"]
+                if ox.get("families"):
+                    result["otx_families"] = ox["families"]
+                if ox.get("adversary"):
+                    result["otx_adversary"] = ox["adversary"]
+        else:
+            # Unavailable (timeout / 5xx / husk) — community status is
+            # unknown, not an answer.
+            result["otx_state"] = "N/A"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# CISA KEV (Known Exploited Vulnerabilities) enrichment — v1.1
+#
+# Architectural odd-one-out among enrichment sources: CISA publishes the
+# KEV catalog only as one JSON document (no per-CVE endpoint, no key, no
+# rate limit), so this is a LOOKUP against a periodically refreshed local
+# copy — alerts' own CVEs are matched against it; nothing is scanned
+# against traffic, so it stays lookup-shaped, not a detection feed.
+#
+# Refresh contract (non-blocking, fail-loud):
+#   - Lazy: the first CVE-bearing alert after TTL expiry triggers the
+#     fetch. Alerts with no CVEs never cause any KEV activity at all.
+#   - One worker fetches; concurrent workers serve the OLD catalog (or
+#     degrade, if none exists yet) rather than waiting on the lock.
+#   - Fetch failures: with no catalog in memory, lookups degrade to
+#     UNAVAILABLE (annotated, warned). With a cached catalog, it serves
+#     silently up to _KEV_STALE_LIMIT_S, then serves WITH a STALE
+#     annotation + warning (an old catalog is still mostly right — KEV
+#     only grows). Fetch attempts are throttled to one per
+#     _KEV_RETRY_THROTTLE_S so an outage doesn't tax every alert.
+# ---------------------------------------------------------------------------
+
+KEV_CATALOG_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
+                   "known_exploited_vulnerabilities.json")
+_KEV_TTL_S = 86400            # refresh cadence: 24h
+_KEV_STALE_LIMIT_S = 172800   # serve stale silently until 48h, then annotate
+_KEV_RETRY_THROTTLE_S = 60    # min gap between fetch attempts after failure
+
+_kev_catalog = None           # dict: CVE-ID -> {date_added, ransomware_use, name}
+_kev_fetched_at = 0.0         # epoch of last SUCCESSFUL fetch
+_kev_last_attempt = 0.0       # epoch of last fetch ATTEMPT (success or fail)
+_kev_fetch_lock = threading.Lock()
+
+# CVE identifier pattern. Case-insensitive; matches are canonicalized to
+# uppercase. 4-7 digit sequence per the official ID scheme.
+CVE_RE = re.compile(r'\bCVE-\d{4}-\d{4,7}\b', re.IGNORECASE)
+
+
+def extract_cves(alert):
+    """
+    Extract CVE identifiers from an alert. The CVE analog of extract_ips.
+
+    Scanned surfaces:
+      - rule.description (Suricata ET signature names carry CVEs here
+        when wrapped by Wazuh)
+      - full_log (raw signature text / payload context)
+      - data.vulnerability.cve (Wazuh vulnerability-detector structured
+        field; may be a string or a list)
+
+    Returns a sorted, deduplicated list of uppercase CVE IDs. Empty list
+    for the (overwhelmingly common) no-CVE alert — the entire KEV feature
+    is a no-op for those.
+    """
+    from ingest import safe_get
+    found = set()
+
+    for surface in (safe_get(alert, "rule", "description"),
+                    safe_get(alert, "full_log")):
+        if isinstance(surface, str) and surface != "N/A":
+            for m in CVE_RE.findall(surface):
+                found.add(m.upper())
+
+    vd = safe_get(alert, "data", "vulnerability", "cve")
+    vd_items = vd if isinstance(vd, list) else [vd]
+    for item in vd_items:
+        if isinstance(item, str):
+            for m in CVE_RE.findall(item):
+                found.add(m.upper())
+
+    return sorted(found)
+
+
+def _kev_fetch():
+    """
+    Fetch and install a fresh KEV catalog. Returns True on success.
+
+    Runs under _kev_fetch_lock (caller holds it). 10s timeout — unlike
+    the 1s per-indicator lookups this is a ~2MB document fetched at most
+    once per _KEV_TTL_S, and only ever from a worker already handling a
+    CVE-bearing alert; a rare bounded 10s worst case is accepted for a
+    once-a-day operation.
+    """
+    global _kev_catalog, _kev_fetched_at
+    try:
+        # Explicit User-Agent: cisa.gov is CDN-fronted and CDNs commonly
+        # 403 the default python-requests agent string.
+        resp = requests.get(KEV_CATALOG_URL, timeout=10,
+                            headers={"User-Agent": "jrSOCtriage/1.1"})
+        if resp.status_code != 200:
+            perf_diag.cache("kev", "fetch_fail")
+            logger.warning(
+                f"KEV catalog fetch failed: HTTP {resp.status_code}")
+            return False
+        vulns = resp.json().get("vulnerabilities", [])
+        if not vulns:
+            # A 200 with an empty/alien body is a failure, not an empty
+            # catalog — KEV has >1000 entries; never install a husk.
+            perf_diag.cache("kev", "fetch_fail")
+            logger.warning("KEV catalog fetch returned no vulnerabilities "
+                           "- keeping previous catalog")
+            return False
+        catalog = {}
+        for v in vulns:
+            cve = str(v.get("cveID", "")).upper()
+            if cve:
+                catalog[cve] = {
+                    "date_added":     _truncate(str(v.get("dateAdded", "")), 32),
+                    "ransomware_use": str(v.get("knownRansomwareCampaignUse", "")).lower() == "known",
+                    "name":           _truncate(str(v.get("vulnerabilityName", "")), 200),
+                }
+        _kev_catalog = catalog
+        _kev_fetched_at = time.time()
+        perf_diag.cache("kev", "fetch_ok")
+        logger.info(f"KEV catalog refreshed: {len(catalog)} entries")
+        return True
+    except (requests.RequestException, ValueError) as e:
+        perf_diag.cache("kev", "fetch_fail")
+        logger.warning(f"KEV catalog fetch failed: {e}")
+        return False
+
+
+def kev_lookup(cves):
+    """
+    Match extracted CVEs against the KEV catalog.
+
+    Returns (state, entries):
+      state:   "ok" | "STALE" | "UNAVAILABLE"
+      entries: [{cve, listed, date_added, ransomware_use}, ...] — one per
+               input CVE, INCLUDING not-listed ones ("checked, not in
+               catalog" is information). Empty when UNAVAILABLE.
+
+    Never blocks on another worker's in-flight fetch: if the fetch lock
+    is held, this call serves whatever catalog currently exists.
+    """
+    global _kev_last_attempt
+    now = time.time()
+    age = now - _kev_fetched_at
+
+    if (_kev_catalog is None or age >= _KEV_TTL_S) and \
+            (now - _kev_last_attempt) >= _KEV_RETRY_THROTTLE_S:
+        # Non-blocking single-fetcher: if another worker is fetching,
+        # skip and serve what exists.
+        if _kev_fetch_lock.acquire(blocking=False):
+            try:
+                _kev_last_attempt = time.time()
+                _kev_fetch()
+                age = time.time() - _kev_fetched_at
+            finally:
+                _kev_fetch_lock.release()
+
+    if _kev_catalog is None:
+        perf_diag.cache("kev", "unavailable")
+        logger.warning(
+            "KEV lookup degraded: no catalog available "
+            "(fetch failing); records annotated UNAVAILABLE")
+        return "UNAVAILABLE", []
+
+    state = "ok"
+    if age >= _KEV_STALE_LIMIT_S:
+        state = "STALE"
+        perf_diag.cache("kev", "stale")
+        logger.warning(
+            f"KEV catalog is stale ({age/3600:.1f}h old; refresh failing) "
+            f"- serving anyway, records annotated STALE")
+
+    entries = []
+    for cve in cves:
+        hit = _kev_catalog.get(cve)
+        if hit:
+            perf_diag.cache("kev", "listed")
+            entries.append({
+                "cve":            cve,
+                "listed":         True,
+                "date_added":     hit["date_added"],
+                "ransomware_use": hit["ransomware_use"],
+            })
+        else:
+            perf_diag.cache("kev", "not_listed")
+            entries.append({
+                "cve":            cve,
+                "listed":         False,
+                "date_added":     "",
+                "ransomware_use": False,
+            })
+    return state, entries
+
+
+EPSS_URL = "https://api.first.org/data/v1/epss"
+
+
+def epss_lookup(cves):
+    """
+    Batch-score CVEs against FIRST.org's EPSS (Exploit Prediction
+    Scoring System). CVE-keyed sibling of kev_lookup, but per-alert
+    batch API lookup instead of a resident catalog: the EPSS corpus is
+    ~250k entries (vs KEV's ~1,300) and the API takes a comma-separated
+    CVE list, so one HTTP call covers an entire alert.
+
+    Returns (state, entries):
+      state:   "ok" | "RATE_LIMITED" | "UNAVAILABLE"
+      entries: [{cve, scored, epss, percentile}, ...] — one per input
+               CVE, INCLUDING not-scored ones (scored=False): a CVE
+               silently absent from the API's data[] is a real answer,
+               "not in the EPSS corpus" (verified live 2026-07-15:
+               batch of one scored + one unassigned CVE returned
+               total=1 with the unassigned ID absent). On a failed
+               fetch, entries still carries whatever the cache had —
+               state signals the failure, cached data is not discarded
+               (serve-what-you-have, the KEV stale-serve principle);
+               entries is empty only when nothing was cached.
+
+    Convoy-safety (standing constraint): _epss_cache_lock is held only
+    for O(1) dict ops, never across I/O; the HTTP call runs outside any
+    lock; there is no shared fetch to coordinate — the whole KEV
+    single-flight problem doesn't exist here. No backoff, no retry.
+
+    Timeout 1s (locked): supplementary signal; a slow answer is worth
+    less than a fast pipeline.
+    """
+    entries_by_cve = {}
+    misses = []
+    for cve in cves:
+        found, cached = _cache_get(_epss_cache, _epss_cache_lock,
+                                   cve, _EPSS_TTL_S)
+        if found:
+            perf_diag.cache("epss", "cache_hit")
+            entries_by_cve[cve] = dict(cached)
+        else:
+            perf_diag.cache("epss", "cache_miss")
+            misses.append(cve)
+
+    state = "ok"
+    if misses:
+        try:
+            resp = requests.get(EPSS_URL,
+                                params={"cve": ",".join(misses)},
+                                timeout=1)
+            if resp.status_code == 429:
+                perf_diag.cache("epss", "rate_limited")
+                # Unconditional warning (locked D3): unlike GreyNoise
+                # keyless there is no routine-429 operating mode here —
+                # one batched call per CVE-bearing alert, cached 24h,
+                # should never hit a limit. A 429 is always anomalous.
+                logger.warning(
+                    f"EPSS rate-limited (HTTP 429) - scores skipped for "
+                    f"{','.join(misses)}; record annotated RATE_LIMITED")
+                state = "RATE_LIMITED"
+            elif resp.status_code != 200:
+                perf_diag.cache("epss", "unavailable")
+                state = "UNAVAILABLE"
+            else:
+                body = resp.json()
+                data = body.get("data")
+                if body.get("status") != "OK" or not isinstance(data, list):
+                    # Husk-guard principle: a 200 with an alien body is
+                    # a failure, not a corpus miss — never install
+                    # garbage as "not scored".
+                    perf_diag.cache("epss", "unavailable")
+                    state = "UNAVAILABLE"
+                else:
+                    returned = {}
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        cve_id = str(item.get("cve", "")).upper()
+                        try:
+                            # Decimal strings per the API contract;
+                            # clamp defensively so a malformed value
+                            # can't leak an out-of-range float into
+                            # GELF. Malformed entries are skipped, not
+                            # batch-fatal.
+                            score = min(max(float(item.get("epss")), 0.0), 1.0)
+                            pct   = min(max(float(item.get("percentile")), 0.0), 1.0)
+                        except (TypeError, ValueError):
+                            continue
+                        if cve_id:
+                            returned[cve_id] = (score, pct)
+                    for cve in misses:
+                        if cve in returned:
+                            perf_diag.cache("epss", "scored")
+                            entry = {"cve": cve, "scored": True,
+                                     "epss": returned[cve][0],
+                                     "percentile": returned[cve][1]}
+                        else:
+                            # Requested but absent from data[] — not in
+                            # the EPSS corpus. A real answer; cached.
+                            perf_diag.cache("epss", "not_scored")
+                            entry = {"cve": cve, "scored": False,
+                                     "epss": None, "percentile": None}
+                        entries_by_cve[cve] = entry
+                        _cache_put(_epss_cache, _epss_cache_lock, cve,
+                                   dict(entry), _EPSS_MAX)
+        except (requests.RequestException, ValueError):
+            perf_diag.cache("epss", "error")
+            state = "UNAVAILABLE"
+        # Failed fetches (429/5xx/timeout/husk) cache nothing — the next
+        # CVE-bearing alert re-asks.
+
+    entries = [entries_by_cve[c] for c in cves if c in entries_by_cve]
+    return state, entries
+
+
+# 32/40/64 hex = md5/sha1/sha256. Longest-first so a sha256 never
+# half-matches as two shorter digests; word-bounded so hex inside
+# longer tokens doesn't false-positive.
+HASH_RE = re.compile(
+    r"\b[0-9a-f]{64}\b|\b[0-9a-f]{40}\b|\b[0-9a-f]{32}\b", re.IGNORECASE)
+
+
+def extract_hashes(alert):
+    """
+    Extract file hashes from an alert as an ordered list of
+    (digest, role) tuples, role in ("current", "previous").
+
+    STRUCTURED-FIRST (locked D1): when alert.syscheck is present, hashes
+    come ONLY from its structured fields — the full_log of a syscheck
+    alert repeats all six digests in prose and regexing it would
+    double-count. One lookup per FILE STATE, not per digest: a
+    md5/sha1/sha256 triplet describes one content state, so take the
+    strongest available digest (sha256 > sha1 > md5) per state.
+
+    ORDER IS PRIORITY (locked D1): "current" (_after) states first —
+    the content on the host now — then "previous" (_before) states,
+    which fill remaining per-alert budget. The before-state exists to
+    catch the removed-malware case (known-bad content just overwritten:
+    attacker cleanup, malware self-replacement, AV remediation).
+
+    Regex sweep of rule.description + full_log is the FALLBACK for
+    hash-bearing non-FIM rules only (role "current"; deduplicated,
+    first-seen order).
+    """
+    from ingest import safe_get
+    out = []
+    syscheck = alert.get("syscheck")
+    if isinstance(syscheck, dict):
+        for role, suffix in (("current", "_after"), ("previous", "_before")):
+            for alg in ("sha256", "sha1", "md5"):
+                h = syscheck.get(f"{alg}{suffix}")
+                if isinstance(h, str) and HASH_RE.fullmatch(h.strip()):
+                    out.append((h.strip().lower(), role))
+                    break
+        return out
+
+    seen = set()
+    for surface in (safe_get(alert, "rule", "description"),
+                    safe_get(alert, "full_log")):
+        if isinstance(surface, str) and surface != "N/A":
+            for m in HASH_RE.findall(surface):
+                h = m.lower()
+                if h not in seen:
+                    seen.add(h)
+                    out.append((h, "current"))
+    return out
+
+
+VT_URL = "https://www.virustotal.com/api/v3"
+
+# 401 warns once per process — bad-key spam guard, same pattern and
+# same FT rationale as the GreyNoise flag (double-log at worst).
+_vt_401_warned = False
+
+
+def vt_lookup(indicator, kind, api_key, warn_on_429=False):
+    """
+    VirusTotal engine-detection lookup for one indicator.
+    kind: "file" (md5/sha1/sha256) or "ip".
+
+    Returns one of:
+      {"state": "hit", "malicious": N, "suspicious": N, "total": N,
+       ["label": str]}                  detections present
+      {"state": "clean", "malicious": 0, "suspicious": 0, "total": N}
+                                        in corpus, zero detections
+      {"state": "not_known"}            404 — never submitted; a real
+                                        answer (NOT "clean"), cached
+      {"state": "RATE_LIMITED"}         429 quota — annotated, not cached
+      {}                                unavailable (no key / 401 /
+                                        timeout / error / husk)
+
+    Denominator rule (live-verified 2026-07-16): total = sum of ALL
+    last_analysis_stats values — the key set differs by kind (files
+    carry confirmed-timeout/failure/type-unsupported, IPs don't), so
+    the keys are never hardcoded. EICAR: 65 malicious of 74; 8.8.8.8:
+    0 of 91.
+
+    Timeout 1s (locked D4 by measurement: 7/8 keyed requests
+    0.26-0.37s from the oob box). No local quota gate (locked D2):
+    call-and-annotate; on the free tier 429s are routine, the warning
+    is config-gated (default off), and RATE_LIMITED annotations
+    accumulating in Graylog are the upgrade signal by design. No
+    backoff, no retry, nothing ever waits on quota.
+    """
+    global _vt_401_warned
+    if not api_key:
+        return {}
+    if kind == "ip":
+        if _safe_ip(indicator) is None:
+            perf_diag.cache("virustotal", "invalid")
+            return {}
+        endpoint, ttl = "ip_addresses", _VT_IP_TTL_S
+    else:
+        if not HASH_RE.fullmatch(indicator or ""):
+            perf_diag.cache("virustotal", "invalid")
+            return {}
+        endpoint, ttl = "files", _VT_HASH_TTL_S
+
+    cache_key = f"{kind}:{indicator}"
+    found, cached = _cache_get(_vt_cache, _vt_cache_lock, cache_key, ttl)
+    if found:
+        perf_diag.cache("virustotal", "cache_hit")
+        return dict(cached)
+    perf_diag.cache("virustotal", "cache_miss")
+
+    try:
+        resp = requests.get(f"{VT_URL}/{endpoint}/{indicator}",
+                            headers={"x-apikey": api_key,
+                                     "Accept": "application/json"},
+                            timeout=1)
+
+        if resp.status_code == 404:
+            # NotFoundError — not in the VT corpus. A real answer:
+            # "never submitted", which is UNKNOWN, not clean (the
+            # interpretation note carries that distinction). Cached.
+            perf_diag.cache("virustotal", "not_known")
+            result = {"state": "not_known"}
+            _cache_put(_vt_cache, _vt_cache_lock, cache_key, result,
+                       _VT_MAX)
+            return dict(result)
+
+        if resp.status_code == 429:
+            perf_diag.cache("virustotal", "rate_limited")
+            if warn_on_429:
+                logger.warning(
+                    f"VirusTotal rate-limited (HTTP 429) - lookup "
+                    f"skipped for {kind} {indicator}; record annotated "
+                    f"RATE_LIMITED")
+            return {"state": "RATE_LIMITED"}
+
+        if resp.status_code == 401:
+            perf_diag.cache("virustotal", "unauthorized")
+            if not _vt_401_warned:
+                _vt_401_warned = True
+                logger.warning(
+                    "VirusTotal API key rejected (HTTP 401) - lookups "
+                    "unavailable until the key is fixed (warned once "
+                    "per process)")
+            # AUTH_FAILED is a first-class state (fail-loud, Kevin
+            # 2026-07-16), NOT the generic unavailable {}: a rejected
+            # key on a required-key source is a persistent
+            # misconfiguration that would otherwise render as N/A —
+            # indistinguishable from a transient timeout — silently
+            # disabling the feature while the operator believes it's
+            # on. The state flows to the record, the prompt block, and
+            # (via gl2_llm_prompt full text) Graylog. Never cached, and
+            # it degrades the whole-IP record (see _record_degraded) so
+            # a fixed key takes effect immediately.
+            return {"state": "AUTH_FAILED"}
+
+        if resp.status_code != 200:
+            perf_diag.cache("virustotal", "error")
+            return {}
+
+        body = resp.json()
+        stats = (body.get("data", {}).get("attributes", {})
+                 .get("last_analysis_stats"))
+        if not isinstance(stats, dict) or not stats:
+            # Husk guard: a 200 with an alien body is a failure, never
+            # an answer.
+            perf_diag.cache("virustotal", "error")
+            return {}
+
+        total = 0
+        for v in stats.values():
+            try:
+                total += int(v)
+            except (TypeError, ValueError):
+                continue
+        malicious  = int(stats.get("malicious", 0) or 0)
+        suspicious = int(stats.get("suspicious", 0) or 0)
+
+        if malicious or suspicious:
+            perf_diag.cache("virustotal", "hit")
+            result = {"state": "hit", "malicious": malicious,
+                      "suspicious": suspicious, "total": total}
+            label = (body.get("data", {}).get("attributes", {})
+                     .get("popular_threat_classification", {})
+                     .get("suggested_threat_label"))
+            if isinstance(label, str) and label.strip():
+                result["label"] = _truncate(label.strip(), 100)
+        else:
+            perf_diag.cache("virustotal", "clean")
+            result = {"state": "clean", "malicious": 0,
+                      "suspicious": 0, "total": total}
+        _cache_put(_vt_cache, _vt_cache_lock, cache_key, result, _VT_MAX)
+        return dict(result)
+    except (requests.RequestException, ValueError):
+        perf_diag.cache("virustotal", "error")
+    # Transient failures are NOT cached — same rule as every sibling.
+    return {}
+
+
+OTX_URL = "https://otx.alienvault.com/api/v1"
+
+
+def otx_lookup(indicator, kind, api_key, warn_on_429=False):
+    """
+    AlienVault OTX community-pulse lookup for one indicator
+    (lookup endpoint only — no subscriptions, no feed sync).
+    kind: "file" (md5/sha1/sha256) or "ip" (v4 or v6).
+
+    Returns one of:
+      {"state": "referenced", "pulses": N, "names": [up to 3],
+       ["latest": "YYYY-MM-DD"], ["families": [...]],
+       ["adversary": str]}              community pulses reference it
+      {"state": "no_reports"}           pulse count 0 — covers BOTH
+                                        unknown indicators and
+                                        known-but-unreferenced
+                                        (live-verified 2026-07-17: the
+                                        API returns 200/count-0 for
+                                        both and cannot distinguish
+                                        them); a real answer, cached
+      {"state": "RATE_LIMITED"}         429 — annotated, never cached
+      {}                                unavailable (timeout / 5xx /
+                                        husk)
+
+    No AUTH_FAILED state and no key validation — deliberately, not an
+    omission: key validity is UNOBSERVABLE on the indicator endpoint in
+    both directions (live-verified 2026-07-17: valid key, bad key, and
+    no key all return HTTP 200 with identical public data). The key's
+    only function is the rate ceiling, and a mistyped key silently
+    behaves as keyless; the interface hint sends the operator to
+    otx.alienvault.com to verify. Keyless is a first-class mode
+    (GreyNoise model): an empty key means lookups run unauthenticated
+    at the lower public ceiling — never bail on a missing key.
+
+    pulse count saturates at 50 (observed page cap) — stored numeric;
+    the prompt renders 50 as "50+". Timeout 1s (0.57s observed keyed
+    from the oob box). 429 handling is defensive (never observed live):
+    call-and-annotate, no backoff, no retry, nothing ever waits on
+    quota. Convoy-safe by construction — one cache lock with ns holds,
+    HTTP outside the lock, no shared fetch, no waits.
+    """
+    if kind == "ip":
+        ip_obj = _safe_ip(indicator)
+        if ip_obj is None:
+            perf_diag.cache("otx", "invalid")
+            return {}
+        ind_type = "IPv6" if ip_obj.version == 6 else "IPv4"
+        ttl = _OTX_IP_TTL_S
+    else:
+        if not HASH_RE.fullmatch(indicator or ""):
+            perf_diag.cache("otx", "invalid")
+            return {}
+        ind_type, ttl = "file", _OTX_HASH_TTL_S
+
+    cache_key = f"{kind}:{indicator}"
+    found, cached = _cache_get(_otx_cache, _otx_cache_lock, cache_key, ttl)
+    if found:
+        perf_diag.cache("otx", "cache_hit")
+        return dict(cached)
+    perf_diag.cache("otx", "cache_miss")
+
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["X-OTX-API-KEY"] = api_key
+
+    try:
+        resp = requests.get(
+            f"{OTX_URL}/indicators/{ind_type}/{indicator}/general",
+            headers=headers, timeout=1)
+
+        if resp.status_code == 429:
+            perf_diag.cache("otx", "rate_limited")
+            if warn_on_429:
+                logger.warning(
+                    f"OTX rate-limited (HTTP 429) - lookup skipped for "
+                    f"{kind} {indicator}; record annotated RATE_LIMITED")
+            return {"state": "RATE_LIMITED"}
+
+        if resp.status_code != 200:
+            # No 404 branch: unknown indicators return 200 with pulse
+            # count 0 (live-verified), so any non-200 here is a real
+            # service failure, not an answer.
+            perf_diag.cache("otx", "error")
+            return {}
+
+        body = resp.json()
+        pulse_info = body.get("pulse_info") if isinstance(body, dict) \
+            else None
+        if not isinstance(pulse_info, dict):
+            # Husk guard: a 200 with an alien body is a failure, never
+            # "no_reports".
+            perf_diag.cache("otx", "error")
+            return {}
+
+        try:
+            count = int(pulse_info.get("count", 0))
+        except (TypeError, ValueError):
+            perf_diag.cache("otx", "error")
+            return {}
+
+        if count <= 0:
+            perf_diag.cache("otx", "no_reports")
+            result = {"state": "no_reports"}
+            _cache_put(_otx_cache, _otx_cache_lock, cache_key, result,
+                       _OTX_MAX)
+            return dict(result)
+
+        perf_diag.cache("otx", "referenced")
+        pulses = pulse_info.get("pulses")
+        pulses = pulses if isinstance(pulses, list) else []
+
+        names, families, adversary, latest = [], [], None, None
+        fam_seen = set()
+        for p in pulses:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name")
+            if isinstance(name, str) and name.strip() and len(names) < 3:
+                names.append(_truncate(name.strip(), 80))
+            modified = p.get("modified")
+            if isinstance(modified, str) and len(modified) >= 10:
+                # ISO strings compare chronologically; keep the max so
+                # "latest" is the most recent reference across ALL
+                # returned pulses, not whichever happens to be first.
+                if latest is None or modified > latest:
+                    latest = modified
+            for fam in (p.get("malware_families") or []):
+                dn = fam.get("display_name") if isinstance(fam, dict) \
+                    else None
+                if isinstance(dn, str) and dn.strip() \
+                        and dn not in fam_seen and len(families) < 3:
+                    fam_seen.add(dn)
+                    families.append(_truncate(dn.strip(), 60))
+            adv = p.get("adversary")
+            if adversary is None and isinstance(adv, str) and adv.strip():
+                adversary = _truncate(adv.strip(), 60)
+
+        result = {"state": "referenced", "pulses": count, "names": names}
+        if latest:
+            result["latest"] = latest[:10]
+        if families:
+            result["families"] = families
+        if adversary:
+            result["adversary"] = adversary
+        _cache_put(_otx_cache, _otx_cache_lock, cache_key, result,
+                   _OTX_MAX)
+        return dict(result)
+    except (requests.RequestException, ValueError):
+        perf_diag.cache("otx", "error")
+    # Transient failures are NOT cached — same rule as every sibling.
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +2067,19 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
             continue
     enrichment["internal_context"] = internal_context
 
+    # --- Hash-source gate (v1.1) ---
+    # One extract_hashes pass feeds three consumers: the VT/OTX hash
+    # sections below, and the mentioned-IP gate — mentioned externals
+    # get VT/OTX lookups ONLY on hash-bearing alerts (locked
+    # 2026-07-18: IP reputation on a regex-found IP earns its quota
+    # only when it can corroborate hash intel on the same record).
+    _vt_cfg_g  = config.get("enrichment", {}).get("virustotal", {})
+    _otx_cfg_g = config.get("enrichment", {}).get("otx", {})
+    vt_on   = _vt_cfg_g.get("enabled", False) and _vt_cfg_g.get("api_key")
+    otx_on  = _otx_cfg_g.get("enabled", False)
+    alert_hashes = extract_hashes(alert) if (vt_on or otx_on) else []
+    mention_vt_otx = bool(alert_hashes)
+
     # --- External IP enrichment - cached to avoid duplicate lookups ---
     # Per-iteration try/except: same defensive logic as internal_context.
     # Network failures, malformed API responses, or unexpected errors on
@@ -1066,12 +2098,23 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
             if ext is not None:
                 perf_diag.cache("external_ip", "cache_hit")
                 logger.debug(f"External IP cache hit: {ip}")
+                if _needs_vt_otx_upgrade(ext, config):
+                    # Cached lite record (built for a hash-less
+                    # mention) — party consumers always need the
+                    # VT/OTX fields. Build-new-and-swap: never mutate
+                    # the published record in place (FT safety).
+                    ext = dict(ext)
+                    ext.update(_vt_otx_ip_fields(ip, config))
+                    if not _record_degraded(ext):
+                        with _ip_enrichment_cache_lock:
+                            _ip_enrichment_cache[ip] = ext
             else:
                 perf_diag.cache("external_ip", "cache_miss")
                 logger.info(f"Enriching external IP: {ip}")
                 ext = enrich_external_ip(ip, config)
-                with _ip_enrichment_cache_lock:
-                    _ip_enrichment_cache[ip] = ext
+                if not _record_degraded(ext):
+                    with _ip_enrichment_cache_lock:
+                        _ip_enrichment_cache[ip] = ext
             external_context.append(ext)
         except Exception as e:
             logger.warning(f"Failed to enrich external IP {ip}: {e}")
@@ -1116,13 +2159,24 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
                 if ext is not None:
                     perf_diag.cache("external_ip", "cache_hit")
                     logger.debug(f"External IP cache hit: {ip}")
+                    if mention_vt_otx and _needs_vt_otx_upgrade(ext, config):
+                        # Hash-bearing alert needs VT/OTX on this
+                        # mention but the cached record is lite —
+                        # upgrade (build-new-and-swap).
+                        ext = dict(ext)
+                        ext.update(_vt_otx_ip_fields(ip, config))
+                        if not _record_degraded(ext):
+                            with _ip_enrichment_cache_lock:
+                                _ip_enrichment_cache[ip] = ext
                 else:
                     perf_diag.cache("external_ip", "cache_miss")
                     logger.info(f"Enriching mentioned external IP: {ip}")
-                    ext = enrich_external_ip(ip, config)
-                    with _ip_enrichment_cache_lock:
-                        _ip_enrichment_cache[ip] = ext
-                mentioned_context.append({
+                    ext = enrich_external_ip(ip, config,
+                                             include_vt_otx=mention_vt_otx)
+                    if not _record_degraded(ext):
+                        with _ip_enrichment_cache_lock:
+                            _ip_enrichment_cache[ip] = ext
+                m_entry = {
                     "ip":          ip,
                     "external":    True,
                     "rdns":        ext.get("rdns", "N/A"),
@@ -1131,14 +2185,191 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
                     "city":        ext.get("city", "N/A"),
                     "asn":         ext.get("asn", "N/A"),
                     "abuse_score": ext.get("abuse_score", "N/A"),
-                })
+                    "greynoise_class": ext.get("greynoise_class", "N/A"),
+                }
+                if mention_vt_otx:
+                    # Hash-bearing alert: VT/OTX ride the mention so
+                    # IP reputation can corroborate the hash intel in
+                    # the same record. Copied only when present.
+                    for k in ("vt_state", "vt_malicious", "vt_total",
+                              "vt_label", "otx_state", "otx_pulses"):
+                        if k in ext:
+                            m_entry[k] = ext[k]
+                mentioned_context.append(m_entry)
         except Exception as e:
             logger.warning(f"Failed to resolve mentioned IP {ip}: {e}")
             continue
     enrichment["mentioned_context"] = mentioned_context
 
+    # --- Mentioned-IP intel flat fields (v1.1) ---
+    # The party/mentioned split is deliberate and stays: gl2_greynoise_
+    # class and gl2_abuse_score describe IPs that are PARTIES to the
+    # alert (structured fields), never regex finds — a DC alert whose
+    # full_log contains a resolved malicious IP must not ship a
+    # malicious class on the party fields. But v1.1 put verdict-grade
+    # intel on the mentioned line, so mentioned results get their OWN
+    # searchable fields, worst-of across all external mentions.
+    # Both are present only when at least one mentioned external IP
+    # produced a real answer (the gl2_epss_max presence pattern);
+    # degraded (RATE_LIMITED) and N/A results contribute nothing.
+    _GN_SEVERITY = {"malicious": 5, "unknown": 4, "not_seen": 3,
+                    "benign": 2, "riot": 1}
+    m_abuse = []
+    m_worst = None
+    for m in mentioned_context:
+        if not m.get("external"):
+            continue
+        score = m.get("abuse_score")
+        if isinstance(score, (int, float)):
+            m_abuse.append(score)
+        cls = m.get("greynoise_class")
+        if cls in _GN_SEVERITY and (
+                m_worst is None
+                or _GN_SEVERITY[cls] > _GN_SEVERITY[m_worst]):
+            m_worst = cls
+    if m_abuse:
+        enrichment["gl2_mentioned_abuse_max"] = max(m_abuse)
+    if m_worst is not None:
+        enrichment["gl2_mentioned_greynoise_worst"] = m_worst
+    # VT/OTX mentioned worst-ofs exist only on hash-bearing alerts
+    # (the gate above) — same numeric-when-present pattern: hit/clean
+    # and referenced/no_reports are answers (clean/none contribute 0);
+    # degraded contributes nothing.
+    m_vt = [e.get("vt_malicious", 0) for e in mentioned_context
+            if e.get("external") and e.get("vt_state") in ("hit", "clean")]
+    if m_vt:
+        enrichment["gl2_mentioned_vt_malicious"] = max(m_vt)
+    m_otx = [e.get("otx_pulses", 0) for e in mentioned_context
+             if e.get("external")
+             and e.get("otx_state") in ("referenced", "no_reports")]
+    if m_otx:
+        enrichment["gl2_mentioned_otx_pulses"] = max(m_otx)
+
     # --- MITRE ---
     enrichment["mitre"] = extract_mitre(alert)
+
+    # --- CISA KEV + EPSS (v1.1) ---
+    # Both are CVE-keyed and share one extract_cves pass. Only when
+    # enabled AND the alert actually carries CVEs. The no-CVE alert
+    # (the overwhelmingly common case) produces no context, no gl2
+    # fields, no fetches, no log lines - a true no-op.
+    kev_cfg  = config.get("enrichment", {}).get("cisa_kev", {})
+    epss_cfg = config.get("enrichment", {}).get("epss", {})
+    kev_on   = kev_cfg.get("enabled", False)
+    epss_on  = epss_cfg.get("enabled", False)
+    cves = extract_cves(alert) if (kev_on or epss_on) else []
+    if cves and kev_on:
+        kev_state, kev_entries = kev_lookup(cves)
+        enrichment["kev_context"] = kev_entries
+        enrichment["kev_state"] = kev_state
+        if kev_state == "ok":
+            enrichment["gl2_kev_listed"] = (
+                "true" if any(e["listed"] for e in kev_entries)
+                else "false")
+        else:
+            # Degraded lookups annotate the state itself so a Graylog
+            # search can find verdicts made without KEV context.
+            enrichment["gl2_kev_listed"] = kev_state
+    if cves and epss_on:
+        epss_state, epss_entries = epss_lookup(cves)
+        enrichment["epss_state"] = epss_state
+        enrichment["epss_entries"] = epss_entries
+        scored = [e["epss"] for e in epss_entries if e.get("scored")]
+        if scored:
+            # Numeric, present ONLY when at least one CVE scored
+            # (locked D2): gl2_epss_max exists for range searches
+            # (gl2_epss_max:>0.5), and shipping "N/A" strings into the
+            # same field would break numeric typing in Elasticsearch.
+            # Degraded/not-scored states are visible in the prompt and
+            # in epss_state, not this field.
+            enrichment["gl2_epss_max"] = max(scored)
+
+    # --- VirusTotal + OTX hashes (v1.1) ---
+    # Both are hash-keyed and share one extract_hashes pass (the
+    # kev/epss shared-extract_cves precedent — zero extra extraction).
+    # Structured-first extraction, one lookup per file state,
+    # current-content states prioritized over previous-content. VT
+    # runs under the per-alert cap (locked D1/D3 — bounds latency and
+    # free-tier burn during FIM storms; over-cap states annotate
+    # NOT_CHECKED, visible not silent). OTX needs no cap (limits are
+    # orders of magnitude above our volume; extraction bounds FIM
+    # lookups at <=2 anyway) and no key (keyless-at-lower-ceiling).
+    # Each runs under its own config gate, independent of the other.
+    # No-hash alerts are a true no-op for both.
+    # vt_on / otx_on / alert_hashes hoisted above the context builds
+    # (one extract_hashes pass feeds hash sections AND the
+    # mentioned-IP gate).
+    vt_cfg  = _vt_cfg_g
+    otx_cfg = _otx_cfg_g
+    if vt_on and alert_hashes:
+        try:
+            cap = max(1, int(vt_cfg.get("per_alert_cap", 4)))
+        except (TypeError, ValueError):
+            cap = 4
+        warn429 = vt_cfg.get("rate_limit_warnings", False)
+        vt_hashes = []
+        spent = 0
+        for digest, role in alert_hashes:
+            if spent >= cap:
+                vt_hashes.append({"hash": digest, "role": role,
+                                  "state": "NOT_CHECKED"})
+                continue
+            r = vt_lookup(digest, "file", vt_cfg["api_key"],
+                          warn_on_429=warn429)
+            spent += 1
+            entry = {"hash": digest, "role": role}
+            if r.get("state"):
+                entry.update(r)
+            else:
+                entry["state"] = "N/A"   # unavailable
+            vt_hashes.append(entry)
+        enrichment["vt_hashes"] = vt_hashes
+
+    if otx_on and alert_hashes:
+        warn429 = otx_cfg.get("rate_limit_warnings", False)
+        otx_hashes = []
+        for digest, role in alert_hashes:
+            r = otx_lookup(digest, "file", otx_cfg.get("api_key", ""),
+                          warn_on_429=warn429)
+            entry = {"hash": digest, "role": role}
+            if r.get("state"):
+                entry.update(r)
+            else:
+                entry["state"] = "N/A"   # unavailable
+            otx_hashes.append(entry)
+        enrichment["otx_hashes"] = otx_hashes
+
+    # gl2_vt_malicious: numeric max malicious count across every
+    # indicator that returned engine counts — hashes AND external IPs,
+    # hit AND clean (a checked-clean alert ships 0, distinguishing
+    # "checked, clean" from unchecked/absent). Present only when
+    # something returned counts (the gl2_epss_max pattern; range-
+    # searchable gl2_vt_malicious:>5).
+    vt_counts = [e["malicious"] for e in enrichment.get("vt_hashes", [])
+                 if e.get("state") in ("hit", "clean")]
+    for ext in external_context:
+        if ext.get("vt_state") in ("hit", "clean"):
+            vt_counts.append(ext.get("vt_malicious", 0))
+    if vt_counts:
+        enrichment["gl2_vt_malicious"] = max(vt_counts)
+
+    # gl2_otx_pulses: numeric max community-pulse count across every
+    # checked indicator — hashes AND external IPs. no_reports
+    # contributes 0 (checked-and-unreferenced is an answer, the VT
+    # checked-clean-zero precedent, so 0 distinguishes "checked, no
+    # community reports" from unchecked/absent); degraded and
+    # unavailable states contribute nothing. Present only when
+    # something was checked (the gl2_epss_max pattern; range-
+    # searchable gl2_otx_pulses:>0). Count saturates at 50 upstream —
+    # the field stays numeric; the prompt renders "50+".
+    otx_counts = [e.get("pulses", 0)
+                  for e in enrichment.get("otx_hashes", [])
+                  if e.get("state") in ("referenced", "no_reports")]
+    for ext in external_context:
+        if ext.get("otx_state") in ("referenced", "no_reports"):
+            otx_counts.append(ext.get("otx_pulses", 0))
+    if otx_counts:
+        enrichment["gl2_otx_pulses"] = max(otx_counts)
 
     # --- Wazuh timing fields - for storm duration in prompt ---
     # Storm tracking: read from the dedup cache if a previous occurrence
@@ -1196,6 +2427,7 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
         enrichment["gl2_src_asn"]      = first_ext.get("asn", "N/A")
         enrichment["gl2_src_rdns"]     = first_ext.get("rdns", "N/A")
         enrichment["gl2_abuse_score"]  = first_ext.get("abuse_score", "N/A")
+        enrichment["gl2_greynoise_class"] = first_ext.get("greynoise_class", "N/A")
     else:
         enrichment["gl2_src_country"]      = "N/A"
         enrichment["gl2_src_country_code"] = "N/A"
@@ -1203,6 +2435,7 @@ def enrich_alert(alert, config, hosts_data, roles_data=None):
         enrichment["gl2_src_asn"]          = "N/A"
         enrichment["gl2_src_rdns"]         = "N/A"
         enrichment["gl2_abuse_score"]      = "N/A"
+        enrichment["gl2_greynoise_class"]  = "N/A"
 
     return enrichment
 

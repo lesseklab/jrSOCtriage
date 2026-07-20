@@ -97,6 +97,124 @@ Alerts above daily baseline:
   gl2_baseline_note:*ABOVE DAILY*
 
 ============================================================
+THREAT INTELLIGENCE SEARCHES (v1.1)
+============================================================
+
+Five per-indicator intelligence sources ship flat fields for searching.
+Two field behaviors, and the difference matters:
+
+  Always-present strings ("N/A" when nothing applies):
+    gl2_kev_listed, gl2_greynoise_class
+  Numeric, present only when something was checked:
+    gl2_epss_max, gl2_vt_malicious, gl2_otx_pulses,
+    gl2_mentioned_abuse_max, gl2_mentioned_vt_malicious,
+    gl2_mentioned_otx_pulses
+    Absent means UNCHECKED (source disabled, no qualifying indicator,
+    or lookup unavailable). 0 means CHECKED and nothing found — a real
+    answer. Use _exists_ to tell coverage apart from results.
+  Present-only string:
+    gl2_mentioned_greynoise_worst (absent when no mentioned external
+    IP produced a real answer)
+
+--- CISA KEV (actively-exploited CVEs) ---
+
+Alert carries a CVE confirmed exploited in the wild:
+  gl2_kev_listed:"true"
+
+CVE present but not in the KEV catalog:
+  gl2_kev_listed:"false"
+
+Verdicts made without KEV context (catalog degraded — worth review):
+  gl2_kev_listed:STALE OR gl2_kev_listed:UNAVAILABLE
+
+--- EPSS (exploitation probability) ---
+
+Any CVE scored:
+  _exists_:gl2_epss_max
+
+High exploitation probability (30-day, modeled):
+  gl2_epss_max:>0.5
+
+Not yet KEV-listed but likely to be exploited (the forward-looking pair):
+  gl2_kev_listed:"false" AND gl2_epss_max:>0.5
+
+--- GreyNoise (internet noise vs. targeted) ---
+
+Source IP NOT seen mass-scanning — the targeted-activity signal:
+  gl2_greynoise_class:not_seen
+
+Known-benign infrastructure (common-business services or benign scanners):
+  gl2_greynoise_class:riot OR gl2_greynoise_class:benign
+
+Known-malicious mass scanner:
+  gl2_greynoise_class:malicious
+
+Lookups skipped by rate limit (free-tier quota audit):
+  gl2_greynoise_class:RATE_LIMITED
+
+Coverage check — external-IP alerts that actually got a GreyNoise answer:
+  _exists_:gl2_greynoise_class AND NOT gl2_greynoise_class:"N\/A"
+  (the / in N/A needs escaping in Graylog query syntax)
+
+--- VirusTotal (antivirus engine detections) ---
+
+Any indicator flagged malicious by at least one engine:
+  gl2_vt_malicious:>0
+
+Strong multi-engine consensus:
+  gl2_vt_malicious:>5
+
+Checked and clean (all indicators, zero engines):
+  gl2_vt_malicious:0
+
+--- AlienVault OTX (community threat reports) ---
+
+Indicator referenced in community pulses:
+  gl2_otx_pulses:>0
+
+Checked, no community reports:
+  gl2_otx_pulses:0
+  (Field value 50 means 50-or-more — the count saturates.)
+
+--- Mentioned-IP intel (IPs in alert text, not parties) ---
+
+The per-source fields above describe IPs that are PARTIES to the
+alert (structured source/destination fields). External IPs that
+merely appear in the alert's raw log text — DNS answers on a domain
+controller, proxied addresses, log references — ship separate
+worst-of fields instead, so a DC alert whose log contains a resolved
+malicious IP never pollutes the party fields:
+
+Alert text references a known-malicious mass scanner:
+  gl2_mentioned_greynoise_worst:malicious
+
+Alert text references high-abuse-score infrastructure:
+  gl2_mentioned_abuse_max:>50
+
+VT/OTX on mentioned IPs are HASH-GATED: they run only when the
+alert also carries a hash change (IP reputation corroborating hash
+intel on one record); hash-less alerts spend no VT/OTX quota on
+mentioned IPs, so these two fields exist only on hash-bearing
+alerts:
+
+Alert text references VT-flagged infrastructure:
+  gl2_mentioned_vt_malicious:>0
+
+Alert text references community-reported infrastructure:
+  gl2_mentioned_otx_pulses:>0
+
+Different question from the party fields: "the alert TEXT references
+known-bad infrastructure" vs "the alert's counterparty is known-bad."
+
+--- Combined ---
+
+Engine detections AND community reporting on the same alert:
+  gl2_vt_malicious:>0 AND gl2_otx_pulses:>0
+
+Actively-exploited CVE that the LLM escalated:
+  gl2_kev_listed:"true" AND gl2_llm_verdict:NOTIFY
+
+============================================================
 HOST-SPECIFIC SEARCHES
 ============================================================
 
@@ -229,3 +347,9 @@ Consider saving these as named searches in Graylog for quick access:
 "Cloud Audit"        gl2_anon:"true"
                      Columns: timestamp, source, gl2_llm_endpoint,
                      gl2_llm_verdict, gl2_llm_confidence, gl2_anon
+
+"Threat Intel Hits"  gl2_kev_listed:"true" OR gl2_vt_malicious:>0 OR
+                     gl2_otx_pulses:>0 OR gl2_greynoise_class:malicious
+                     Columns: timestamp, source, gl2_kev_listed,
+                     gl2_epss_max, gl2_vt_malicious, gl2_otx_pulses,
+                     gl2_greynoise_class, gl2_llm_verdict

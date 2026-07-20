@@ -34,9 +34,9 @@ Multi-tenancy cannot be retrofitted cleanly onto a tenant-naive schema. Every co
 
 ---
 
-## v1.0 — Single-host, single-domain (current)
+## v1.0 — Single-host, single-domain
 
-**Status: shipping.**
+**Status: shipped.**
 
 Validated for home labs and small businesses. JSON-backed configuration, local SQLite for operational state. One Wazuh manager, one Graylog instance, one LLM endpoint chain, and a team of co-equal administrators sharing the install.
 
@@ -49,7 +49,16 @@ This release establishes the core value proposition: LLM-assisted triage that re
 
 ---
 
-## v1.1 — Expanded threat-intelligence enrichment
+## v1.1 — Expanded threat-intelligence enrichment (current)
+
+**Status: shipped 2026-07-19.**
+
+All five sources described below are live: GreyNoise, CISA KEV, EPSS,
+VirusTotal, and AlienVault OTX. Each was verified against its production API
+before release, and each ships disabled by default — supply a key in the
+interface to turn one on. Shodan, listed in an earlier revision of this page,
+was cut during the release; EPSS was added in its place. See *Not in v1.1*
+below for the reasoning on both.
 
 **Goal: give the LLM and the analyst more *actionable* context per alert — context that can change a triage verdict — by adding per-indicator threat-intelligence lookups, without changing the architecture.**
 
@@ -64,9 +73,9 @@ Two design principles govern which sources are added:
 
 - **GreyNoise (verdict-changing).** Per-IP: distinguishes benign internet-wide background scanning — the constant hum of mass scanners like Shodan and Censys and common services — from activity that is actually targeted. Among the most directly actionable signals available: an alert from a known mass-scanner can be de-prioritized with confidence while a non-noise source keeps its weight. Runs on the free GreyNoise Community API for home labs; commercial deployments use a paid GreyNoise Enterprise key on the same integration for higher volume and richer context. Bring your own key at either tier.
 - **CISA KEV (verdict-changing).** Per-CVE: checks an alert's CVE against CISA's Known Exploited Vulnerabilities catalog — vulnerabilities confirmed to be actively exploited in the wild. Whether a vulnerability is merely present or is being exploited right now is a first-order triage question. Free, no key, no rate limit — the best effort-to-value ratio in the set.
+- **EPSS (verdict-informing).** Per-CVE: FIRST.org's Exploit Prediction Scoring System — the modeled probability that the CVE will be exploited in the next 30 days. Pairs directly with KEV: KEV says a CVE *has* been exploited (confirmed past), EPSS says how likely it is *to be* (modeled forward), and the two render side by side so that pairing is read together. Free, no key. Added during the release, unplanned — the KEV work surfaced it and the effort-to-value ratio was too good to leave on the table.
 - **VirusTotal (verdict-informing).** Per-indicator (hash, URL, domain, IP): multi-engine reputation — how many engines flag the indicator as malicious. Genuinely actionable. A home lab can use VirusTotal's free public API (non-commercial, 4 requests/minute, 500/day); a commercial deployment uses a paid VirusTotal Enterprise key on the same integration, which is required for commercial use and lifts the rate limits. Bring your own key at whichever tier fits — the operator's own account governs its use.
 - **AlienVault OTX (verdict-informing).** Per-indicator lookup against the Open Threat Exchange community — association with known campaigns and adversary techniques (MITRE ATT&CK), pulled via the indicator-lookup endpoint (not the bulk pulse feed). Useful mainly for the analyst-facing side of the output, helping a human understand *what* an indicator might belong to. Free with an account.
-- **Shodan (investigation-supporting).** Per-IP: what services and ports the address exposes to the internet. More useful for an analyst pivoting into an investigation than for automatic per-alert enrichment. A home lab's free tier is low-volume (100 lookups/month), enough for occasional deep-dives; a paid Shodan membership on the same integration raises that ceiling for deployments that want it on more alerts. Supported as an opt-in investigative aid at either tier rather than a default per-alert lookup.
 
 ### How this is framed
 
@@ -76,6 +85,7 @@ The value is *more actionable triage*, not *more integrations*. The headline is 
 - No detection feeds. Bulk blocklists (URLhaus, ThreatFox, Feodo, and the like) belong upstream in Suricata/Wazuh, not in jrSOCtriage.
 - No architecture change, no storage-model change, no multi-tenancy.
 - No source that lacks a free home-lab tier is added — the free tier is a guaranteed floor so a lab is never locked out — but every integration equally supports the vendor's paid/commercial tier for production use.
+- **Shodan, listed in an earlier revision of this page, was cut during the release.** Evaluated against the shipped sources, per-alert exposure data on an external actor's box (its open ports and service banners) doesn't change triage verdicts — the sources above already answer who owns an IP, whether it's been reported, whether it mass-scans, its engine reputation, and its community attribution. The analyst deep-dive Shodan genuinely serves is better done on Shodan's own interface, pivoting from the `gl2_src_*` fields already shipped with every alert. EPSS — unplanned, surfaced by the KEV work — was added in its place, so the release ends ahead of the original list on verdict-relevant signal.
 
 ---
 
@@ -280,7 +290,7 @@ By v2.0, every component has been engineered for multi-tenancy and stateless ope
 
 Every release on the path delivers value to single-host operators on its own, while proving one specific piece that the shared multi-tenant platform later assembles. The sequence is a deliberate de-risking of v2.0: by the time the platform release arrives, none of its hard parts are new.
 
-- **v1.1** deepens the triage itself: new per-indicator threat-intelligence lookups — GreyNoise (internet-noise vs. targeted), CISA KEV (actively-exploited CVEs), VirusTotal, AlienVault OTX, and Shodan — that give the model and the analyst context capable of changing a verdict. It ships first because it is the lowest-risk, most immediately useful improvement — it rides the existing enrichment path, changes no architecture, and directly reinforces the product's core job of cutting alert noise.
+- **v1.1** deepens the triage itself: new per-indicator threat-intelligence lookups — GreyNoise (internet-noise vs. targeted), CISA KEV (actively-exploited CVEs), EPSS (exploitation probability), VirusTotal, and AlienVault OTX — that give the model and the analyst context capable of changing a verdict. It ships first because it is the lowest-risk, most immediately useful improvement — it rides the existing enrichment path, changes no architecture, and directly reinforces the product's core job of cutting alert noise.
 - **v1.2** makes v1.0 deployable in stricter environments — surge handling for local-only viability, credential hardening, and a methodical correctness pass — while establishing the role and credential abstractions later releases build on.
 - **v1.3** lays the foundations: configuration in SQLite, carrying the existing tenant identity into the store as a `tenant_id` column on every table; a pluggable alert-source contract with Falcon as its first non-Wazuh implementation; and ELK support as a log-evidence backend and Graylog-alternative sink. This is where both through-lines — tenancy and a broader integration surface — get their real substrate.
 - **v1.4** proves the tenant model: a tenant-aware interface, RBAC, and per-tenant configuration, all on the existing storage. Multi-tenancy becomes real and manageable before any backend change.
@@ -293,7 +303,7 @@ The single most important early commitment is shipping the tenant identifier in 
 
 | Release | User-visible value | Platform foundation it proves |
 |---|---|---|
-| v1.1 | More actionable triage via new per-indicator lookups — GreyNoise (noise vs. targeted), CISA KEV (actively-exploited CVEs), VirusTotal, AlienVault OTX, Shodan — bring-your-own-key on the free or the commercial tier, with a free home-lab tier guaranteed | Per-indicator enrichment lookup pattern; downstream-of-detection boundary |
+| v1.1 | More actionable triage via new per-indicator lookups — GreyNoise (noise vs. targeted), CISA KEV (actively-exploited CVEs), EPSS (exploitation probability), VirusTotal, AlienVault OTX — bring-your-own-key on the free or the commercial tier, with a free home-lab tier guaranteed | Per-indicator enrichment lookup pattern; downstream-of-detection boundary |
 | v1.2 | Local-only SMB viability (surge handling), credential and correctness hardening, per-role context windows, GUI diagnostics, self-service password change | Role and credential abstractions; queue-depth control loop |
 | v1.3 | Configuration in SQLite with audit log; Falcon alert source; ELK as evidence backend and Graylog-alternative sink | Tenant-partitioned config store and repository abstraction; alert-source plugin contract and normalization |
 | v1.4 | Tenant-aware interface, RBAC, SSO, per-tenant LLM config, verdict history and replay | Tenant context enforced throughout the application |
