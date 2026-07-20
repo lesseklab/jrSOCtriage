@@ -46,6 +46,11 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
+# Resolve to an absolute path. The systemd unit needs a real path, and it
+# must be THIS interpreter — otherwise PYTHON_BIN=python3.14 would install and
+# test against 3.14 while the service quietly ran something else.
+PYTHON_ABS="$(command -v "$PYTHON_BIN")"
+
 PY_VERSION=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 PY_MAJOR=$("$PYTHON_BIN" -c 'import sys; print(sys.version_info.major)')
 PY_MINOR=$("$PYTHON_BIN" -c 'import sys; print(sys.version_info.minor)')
@@ -116,6 +121,40 @@ if [ -n "$MISSING" ]; then
 fi
 
 echo "[OK] Source files present"
+
+# Templates are only fatal when the corresponding working file is ALSO
+# absent — that is the case where the operator ends up with no config at
+# all. If the working file already exists, a missing template is harmless
+# (nothing would be copied anyway) and re-running setup must not fail.
+TEMPLATE_FATAL=""
+for f in config hosts roles rules users domain anonymization; do
+    [ -f "$INSTALL_DIR/${f}.json" ] && continue
+    FOUND=""
+    for candidate in "${f}.json.sample" "${f}_json.sample" "${f}_json_sample.txt"; do
+        [ -f "$INSTALL_DIR/$candidate" ] && FOUND=1 && break
+    done
+    [ -z "$FOUND" ] && TEMPLATE_FATAL="$TEMPLATE_FATAL ${f}.json.sample"
+done
+
+if [ -n "$TEMPLATE_FATAL" ]; then
+    echo "ERROR: no template found for these state files, and no working copy"
+    echo "       exists either — the install would have no configuration:"
+    for f in $TEMPLATE_FATAL; do
+        echo "    $f"
+    done
+    echo
+    echo "Re-download or re-clone the distribution before retrying."
+    exit 1
+fi
+
+# Service files are not fatal: an operator who has already installed them
+# under /etc/systemd/system may reasonably have removed the local copies.
+for f in jrsoctriage.service jrsoctriage-interface.service; do
+    if [ ! -f "$INSTALL_DIR/$f" ]; then
+        echo "[!!] $f not found. Systemd installation instructions at the end"
+        echo "     of this script will not apply until you restore it."
+    fi
+done
 
 # --- Install PIPELINE dependencies system-wide -------------------------------
 # The pipeline runs under /usr/bin/python3 as root via systemd, so its
@@ -213,8 +252,8 @@ echo "[..] Updating systemd service files with install path"
 # jrsoctriage.service (pipeline)
 if [ -f "$INSTALL_DIR/jrsoctriage.service" ]; then
     sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$INSTALL_DIR|" "$INSTALL_DIR/jrsoctriage.service"
-    sed -i "s|^ExecStart=.*|ExecStart=/usr/bin/python3 main.py|" "$INSTALL_DIR/jrsoctriage.service"
-    echo "    updated jrsoctriage.service"
+    sed -i "s|^ExecStart=.*|ExecStart=$PYTHON_ABS main.py|" "$INSTALL_DIR/jrsoctriage.service"
+    echo "    updated jrsoctriage.service (ExecStart=$PYTHON_ABS main.py)"
 else
     echo "    WARNING: jrsoctriage.service not found"
 fi
@@ -301,7 +340,7 @@ else
     echo "    import graph resolves (including deferred imports)"
 fi
 
-PIPELINE_MODULES="anonymize database dedup email_sender enrich gelf_shipper graylog_fetch ingest lag_logger llm_caller main ntopng_fetch prompt_builder rules zeek_fetch"
+PIPELINE_MODULES="anonymize database dedup email_sender enrich gelf_shipper graylog_fetch ingest lag_logger llm_caller main maintenance merge_hosts ntopng_fetch prompt_builder rules wazuh_import zeek_fetch"
 
 IMPORT_FAIL=0
 for m in $PIPELINE_MODULES; do
@@ -325,8 +364,18 @@ fi
 if [ "$SMOKE_FAIL" -eq 0 ]; then
     echo "[OK] distribution is complete and imports cleanly"
 else
-    echo "[!!] Setup finished, but the checks above found problems that will stop"
-    echo "     the service from starting. Fix them before enabling the services."
+    echo
+    echo "==============================================="
+    echo "  SETUP FAILED"
+    echo "==============================================="
+    echo
+    echo "The checks above found problems that will stop the services from"
+    echo "starting. Do not enable them until these are resolved."
+    echo
+    echo "Everything up to this point — dependencies, venv, state files,"
+    echo "unit-file paths — has been done, so it is safe to fix the problem"
+    echo "and re-run this script."
+    exit 1
 fi
 
 # --- Done --------------------------------------------------------------------
@@ -377,6 +426,6 @@ Notes:
       $VENV_DIR/bin/python3
 
 - The pipeline (main.py) uses system Python:
-      /usr/bin/python3
+      $PYTHON_ABS
 
 EOF

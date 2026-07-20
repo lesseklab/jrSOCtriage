@@ -5831,7 +5831,7 @@ The prompt sent to the LLM has two layers of guidance:
      Editable through the Config tab in the web interface or
      directly in config.json.
 
-The defaults shipped in config_json.sample assume the most common
+The defaults shipped in config.json.sample assume the most common
 self-hosted IDS deployment shape: Suricata on a SPAN/mirror port,
 ntopng for active flow visibility, Wazuh for endpoint signal.
 Operators with different deployment shapes should remove or edit

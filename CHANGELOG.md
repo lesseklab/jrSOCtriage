@@ -4,6 +4,44 @@ All notable changes to jrSOCtriage are documented here.
 
 ---
 
+## [1.1.4] — 2026-07-20
+
+### Fixed
+
+- **`setup.sh` reported success after a failed self-test.** The completeness
+  check printed its warnings and the script then printed "Setup complete!" and
+  exited `0`, so a scripted install or a CI step would treat a broken install
+  as good. A failed check now prints a clear failure banner and exits `1`.
+  Everything before the check has already been done at that point, so it
+  remains safe to fix the problem and re-run.
+
+- **`setup.sh` did not verify the state-file templates it depends on.** A
+  missing template produced the misleading line "nothing to initialize —
+  working files already present" and an install with no configuration at all.
+  Templates are now checked up front, and a missing one is fatal only when the
+  corresponding working file is also absent — so re-running after an install
+  still succeeds if the templates have since been removed.
+
+  Missing unit files are reported as a warning rather than an error, since an
+  operator who has already installed them under `/etc/systemd/system` may
+  legitimately have removed the local copies.
+
+- **The `PYTHON_BIN` override did not reach the generated unit file.**
+  `PYTHON_BIN=python3.14 bash setup.sh` installed dependencies and ran its
+  checks with that interpreter, but always wrote
+  `ExecStart=/usr/bin/python3 main.py` into `jrsoctriage.service` — so the
+  service could run an interpreter that was never prepared or tested. The
+  override is now resolved to an absolute path and used consistently for
+  installation, verification, and the unit file.
+
+- The import check now also covers `maintenance`, `merge_hosts`, and
+  `wazuh_import`, which were omitted.
+
+- `running_instructions.txt` referred to `config_json.sample`; the shipped
+  template is `config.json.sample`.
+
+---
+
 ## [1.1.3] — 2026-07-20
 
 ### Fixed
