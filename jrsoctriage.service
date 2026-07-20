@@ -7,12 +7,13 @@ Wants=network-online.target
 # IMPORTANT: Edit WorkingDirectory below if your install is not at
 # /mnt/appdata/jrsoctriage.
 #
-# The pipeline (main.py) uses system Python — its only third-party
-# dependency is `requests`, which is typically already available. If
-# `requests` is not installed system-wide, install it via:
-#     sudo apt install python3-requests        # Debian/Ubuntu
-#     sudo dnf install python3-requests        # Fedora/RHEL
-#     pip install requests --break-system-packages    # any distro
+# The pipeline (main.py) uses system Python and needs two third-party
+# packages installed system-wide: `requests` and `dnspython`. setup.sh
+# installs both from requirements.txt. To install them by hand:
+#     sudo pip install -r requirements.txt --break-system-packages
+# or via distro packages:
+#     sudo apt install python3-requests python3-dnspython   # Debian/Ubuntu
+#     sudo dnf install python3-requests python3-dns         # Fedora/RHEL
 #
 # The interface (interface.py) uses a venv. See
 # jrsoctriage-interface.service for that unit file.
@@ -26,21 +27,21 @@ ExecStart=/usr/bin/python3 main.py
 Restart=on-failure
 RestartSec=30
 
-# Graceful shutdown can take longer than systemd's typical default of 90
-# seconds. When SIGTERM arrives, the pipeline lets in-flight LLM calls
-# finish before exiting — a single local-Ollama call can take 15-20s,
-# and a worst-case parallel batch with cloud fallback retries can easily
-# stretch to 2-3 minutes. We raise TimeoutStopSec to 5 minutes so a
-# normal restart drains cleanly instead of hitting SIGKILL midway through.
+# Graceful shutdown: when SIGTERM arrives, the pipeline drains its
+# pending queue under an internal 85-second budget (SHUTDOWN_TIMEOUT_S
+# in main.py) — sized for the worst realistic drain of ~4 local-LLM
+# calls per worker slot at ~20s each. TimeoutStopSec must stay ABOVE
+# that internal budget so the drain finishes and the shutdown
+# accounting logs before systemd escalates to SIGKILL; 100s gives the
+# 85s drain a 15s margin for thread joins and final logging.
 #
-# Tradeoff: a genuinely-stuck pipeline takes 5 minutes to force-kill
-# instead of 30 seconds. That's the right tradeoff because SIGKILL on a
-# live pipeline can leave SQLite in WAL-pending state and lose in-memory
-# dedup state, causing alert reprocessing on next start. Atomic state
-# writes (interface.py save_json, ingest.py save_position) protect the
-# persistent state regardless, but the in-memory state is still worth
-# preserving when shutdown is graceful.
-TimeoutStopSec=300
+# Tradeoff: SIGKILL on a live pipeline can leave SQLite in WAL-pending
+# state and lose in-memory dedup state, causing alert reprocessing on
+# next start. Atomic state writes (interface.py save_json, ingest.py
+# save_position) protect the persistent state regardless, but the
+# graceful path is worth the margin. If you raise SHUTDOWN_TIMEOUT_S
+# in main.py, raise this with it (keep TimeoutStopSec > budget + 15s).
+TimeoutStopSec=100
 
 StandardOutput=journal
 StandardError=journal

@@ -4,6 +4,53 @@ All notable changes to jrSOCtriage are documented here.
 
 ---
 
+## [1.1.3] — 2026-07-20
+
+### Fixed
+
+- **A clean install could not reach first run by following the documented
+  steps.** Three separate defects in the install path, all present since
+  1.0.0:
+
+  - **`setup.sh` did not install the pipeline's dependencies.** It set up the
+    interface venv only. The getting-started guide states that `requests` and
+    `dnspython` are installed system-wide in the same run; they were not, so
+    the pipeline could fail on import depending on what the host already had.
+    `setup.sh` now installs `requirements.txt` against system Python, falling
+    back to `--break-system-packages` on distributions that mark system Python
+    as externally managed, and prints manual instructions if both fail.
+
+  - **No state file was ever initialized from its template.** `setup.sh`
+    looked for `config.json.sample`, `hosts.json.sample` and so on, while the
+    distribution shipped `config_json_sample.txt`, `hosts_json.sample` and
+    other inconsistent spellings. Nothing matched, so a fresh install had no
+    `config.json` to start from. `roles` was also missing from the list
+    entirely. The templates are now named consistently as
+    `<name>.json.sample`, `roles` is included, and `setup.sh` still accepts
+    the older spellings so an upgrade in place works.
+
+  - **`jrsoctriage.service` understated the pipeline's dependencies**, naming
+    only `requests`. `dnspython` is equally required — reverse DNS is on the
+    enrichment path. Corrected, with both distro and pip instructions.
+
+- **`setup.sh` now verifies the distribution before doing any work**, listing
+  every runtime module and failing with the specific missing filenames rather
+  than proceeding to a broken install.
+
+### Added
+
+- **`setup.sh` finishes with a completeness check.** It resolves the local
+  import graph statically, then imports every pipeline module with system
+  Python and the interface with the venv Python.
+
+  The static pass matters because `main.py` imports its sibling modules inside
+  functions rather than at module level, so a plain `import main` succeeds even
+  when modules are missing — which is how the missing `lag_logger` in 1.1.1
+  escaped notice. Walking the syntax tree finds deferred imports that importing
+  the module cannot.
+
+---
+
 ## [1.1.2] — 2026-07-20
 
 ### Fixed
