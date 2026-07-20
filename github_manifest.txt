@@ -1,0 +1,223 @@
+========================================================================
+jrSOCtriage — GitHub Publish Manifest
+========================================================================
+ALLOWLIST. If a project file is NOT listed under "SHIP" below, it does
+NOT go to GitHub. This is deliberate — default is DO NOT PUBLISH, so
+nothing leaks by omission.
+
+Generated 2026-07-01. Updated 2026-07-03 (LICENSE, THIRD-PARTY-NOTICES,
+faq.md finalized and moved to SHIP). Updated 2026-07-19 for the v1.1
+release (CHANGELOG.md and support.md classified SHIP; v1.1 enrichment
+tests, enrichment specs, and website tooling classified DO NOT SHIP).
+Review before every push; update as files change.
+========================================================================
+
+
+== SHIP — PRODUCT SOURCE (Python modules) ==============================
+anonymize.py
+database.py
+dedup.py
+email_sender.py
+enrich.py
+gelf_shipper.py
+lag_logger.py                   # CORRECTED 2026-07-20. Was wrongly grouped with
+                                #   the dev harnesses. It is product code:
+                                #   main.py imports it unconditionally at
+                                #   startup (run(), ~line 1618), NullLagState is
+                                #   the production default path, lag_state has
+                                #   35 call sites in main.py, and [LAG] is a
+                                #   documented operator feature
+                                #   (observability.lag_log_interval_seconds is
+                                #   in config_instructions, the config sample,
+                                #   and faq.md). Withholding it made the
+                                #   published repo crash at service start.
+                                #   Contrast perf_diag.py, which stays internal:
+                                #   nothing wires its configure(), no config key
+                                #   ships, and it takes a lock on the per-alert
+                                #   path when enabled.
+graylog_fetch.py
+ingest.py
+interface.py
+llm_caller.py
+main.py
+maintenance.py
+merge_hosts.py
+ntopng_fetch.py
+prompt_builder.py
+rules.py
+wazuh_import.py
+zeek_fetch.py
+
+
+== SHIP — SAMPLE CONFIG FILES (safe by design; no real data) ===========
+anonymization_json.sample
+config_json_sample.txt
+domain_json.sample
+hosts_json.sample
+roles_json_sample.txt
+rules_json.sample
+users_json.sample
+
+
+== SHIP — SETUP / RUNTIME ==============================================
+setup.sh                        # the actual product setup program
+requirements.txt
+jrsoctriage.service
+jrsoctriage-interface.service
+# (the *_service.txt copies are duplicates of the .service files —
+#  ship the .service files, not the .txt copies)
+
+
+== SHIP — USER-FACING DOCS (markdown / txt sources) ====================
+readme.md
+getting_started.md
+CHANGELOG.md                    # ADDED 2026-07-19. Keep-a-Changelog format,
+                                #   [1.1.0] and [1.0.0]. Customer-facing
+                                #   release history; no internal content.
+support.md                      # ADDED 2026-07-19. Was unclassified. Source
+                                #   for support.html; free-community-support
+                                #   and paid-contract terms. The placeholder
+                                #   URL was repaired 2026-07-19 to the real
+                                #   Issues link; verified by regenerating
+                                #   support.html byte-identical to the live
+                                #   page.
+faq.md                          # ✅ DONE 2026-07-03 (item 6). Customer
+                                #   FAQ, 11 Q&A; renders to faq.html via
+                                #   the website build.
+writing_notes.md                # CORRECTED 2026-07-19. Was wrongly listed
+                                #   DO NOT SHIP as "internal writing notes."
+                                #   It is not internal: it has been published
+                                #   at /docs/writing-notes.html since v1.0 as
+                                #   doc card "09 · Writing Notes". Prose on
+                                #   host/rule notes shaping LLM verdicts.
+running_instructions.txt
+config_instructions.txt
+hosts_instructions.txt
+roles_instructions.txt
+rules_instructions.txt
+interface_requirements.txt
+interface_guide.txt
+graylog_searches.txt
+
+
+== SHIP — LEGAL / ATTRIBUTION (finalized) =============================
+LICENSE                         # ✅ DONE 2026-07-03 (item 4). Plain-text,
+                                #   no extension, from lawyer-approved docx
+                                #   with tracked changes accepted. Ship the
+                                #   plain LICENSE only — NOT the .docx sources.
+jrSOCtriage_THIRD-PARTY-NOTICES.txt
+                                # ✅ DONE 2026-07-03 (item 5). Final version
+                                #   WITH llama.cpp added (verbatim MIT #17 +
+                                #   services list). Ship THIS file — NOT the
+                                #   old jrSOCtriage_THIRD-PARTY-NOTICES__1_.txt.
+                                #   NOTE: this file IS the public attribution
+                                #   artifact — it was BUILT FROM dependency_
+                                #   inventory. The inventory itself does NOT
+                                #   ship (internal source; see DO NOT SHIP).
+roadmap.md                      # ✅ DONE — sanitized 2026-07-02 (item 3).
+                                #   Customer-facing roadmap; internal content
+                                #   (case-mgmt secret, who-pays reasoning,
+                                #   internal-version detail) already stripped.
+
+
+== SHIP PENDING — (none) ==============================================
+# All previously-pending items are resolved:
+#   LICENSE, THIRD-PARTY-NOTICES, faq.md -> finalized & shipping (above)
+#   roadmap.md -> sanitized & shipping (above)
+#   dependency_inventory -> internal source, does NOT ship (below)
+
+
+== DO NOT SHIP — reference list (why each is excluded) =================
+# Internal working / strategy (private — some contain secrets):
+#   github_manifest.txt  (this file — publish control, internal)
+#   New_ToDo.md          (current internal todo list)
+#   CLAUDE.md            (AI context: commercial strategy, pricing,
+#                         case-mgmt SECRET, personal economics)
+#   active_todo.md (HISTORICAL — superseded by New_ToDo.md),
+#   historical_todo.md, historical_todo_3.md
+#   dependency_inventory.md and dependency_inventory.docx  (INTERNAL
+#                         license-audit working doc;
+#                         the public jrSOCtriage_THIRD-PARTY-NOTICES.txt
+#                         was BUILT FROM it and ships in its place)
+#
+# Real config (SECRETS — never publish):
+#   anonymization.json   (LIVE config — may hold real hosts/IPs/subnets;
+#                         the .sample ships instead)
+#   [verify no real config.json / hosts.json / users.json / roles.json /
+#    domain.json are present — only .sample versions should exist]
+#
+# Website tooling / rendered site (published to website, not GitHub):
+#   install.sh           (website update mechanism, NOT a product installer)
+#   build_site.py        (static-site generator; internal tooling)
+#   WEBSITE_UPDATE_PROCEDURE.md, website_selfheal_deploy_design.md,
+#   site_v16_deploy_notes.md
+#   sitemap.xml, robots.txt   (generated site artifacts)
+#   All .html files, WITHOUT EXCEPTION — rendered docs go to the website,
+#                         never to GitHub. Current set: readme.html,
+#                         getting-started.html, interface-guide.html,
+#                         running.html, config.html, hosts.html, roles.html,
+#                         rules.html, writing-notes.html, roadmap.html,
+#                         graylog-searches.html, faq.html, support.html,
+#                         license.html, index.html, index__1_.html,
+#                         index__2_.html. Any new .html is DO NOT SHIP by
+#                         this rule without needing a manifest edit.
+#
+# Findings / investigation / dev-history docs (internal — Kevin: no findings docs):
+#   GIL_convoy_fix.md, freethreading_conversion_findings.md,
+#   item23_findings.md, stall_investigation_2_session_2026-06-22b.md,
+#   handoff_rewrite_design.md, handoff_rewrite_diff_review.md,
+#   v1_1_hardening_audit.md, v1_1_move_analysis.md,
+#   interface_drift.md   (register of dead config knobs pending removal —
+#                         internal defect list, do not hand to buyers),
+#   greynoise_enrichment_spec.md, otx_enrichment_spec.md   (v1.1 internal
+#                         design specs — the shipped behavior is documented
+#                         in config_instructions/interface_guide instead),
+#   roadmap_pre-remake-backup.md,
+#   subnet_anonymization_build.md, INGEST_REDESIGN_DEPLOY_NOTES.md
+#
+# Dev / test / diagnostic scaffolding & harnesses (internal — Kevin: no harness,
+# and tests stay internal too — don't hand buyers the dev/validation work
+# already done; the test suite + load harness are product-value R&D, not
+# something to redistribute):
+#   loac.py, perf_diag.py, db_instrument.py, designA_harness.py,
+#   harness.js, js_syntax_gate.py, pyspy_logger.py,
+#   main_known_good.py (backup copy),
+#   test_anon_concurrency.py, test_email_escape.py, test_prune_dispatch.py,
+#   test_substitute.py, test_weby_isolation.py,
+#   test_greynoise.py, test_epss.py, test_virustotal.py, test_otx.py,
+#   test_mentioned_fields.py          (v1.1 enrichment tests — same rule),
+#   interface_stage1_toggle_removal.py (one-off migration script)
+#
+# Draft .docx + superseded files (equivalents ship as plain files):
+#   jrSOCtriage_License_v1_0.docx,
+#   jrSOCtriage_License_v1_0_Sent.docx, jrSOCtriage_License_v1_0_Sent__2_.docx
+#   jrSOCtriage_THIRD-PARTY-NOTICES__1_.txt (SUPERSEDED — the plain
+#     jrSOCtriage_THIRD-PARTY-NOTICES.txt ships instead)
+#
+# Duplicated .txt copies of shipped files:
+#   jrsoctriage_service.txt, jrsoctriage-interface_service.txt
+#   (the .service files ship instead)
+#   config_json.sample   (STALE — confirmed 2026-07-19. config_json_sample.txt
+#                         is the maintained copy and is the one on the SHIP
+#                         list. Do not ship or update the .sample; consider
+#                         deleting it to remove the ambiguity.)
+#   (writing-notes.html is covered by the blanket .html rule above;
+#    writing_notes.md itself SHIPS — see the docs list.)
+
+
+== OPEN ITEMS FOR THE v1.1 PUSH =======================================
+# Test files decision RESOLVED 2026-07-03: all test_*.py stay INTERNAL
+# (do not ship) — grouped with the harnesses above.
+#
+# Both pre-push blockers are RESOLVED (2026-07-19):
+#   1. support.md placeholder URL — FIXED, verified against the live page.
+#   2. config_json.sample vs config_json_sample.txt — the .sample is stale;
+#      config_json_sample.txt is maintained and is the one that ships.
+#
+# Still stale but NOT a publish blocker (website-only impact):
+#   config_instructions.txt is older than the live config.html — missing the
+#   frequency-anomaly interface cross-reference and still carrying the
+#   pre-measurement "database is locked" framing for jrsoc.db hosting.
+#   Back-port before the docs are treated as current.
+#
+# Re-verify the full allowlist once more at push time.
