@@ -4,6 +4,25 @@ All notable changes to jrSOCtriage are documented here.
 
 ---
 
+## [1.1.5] — 2026-07-20
+
+### Fixed
+
+- **`setup.sh` installed the pipeline's dependencies for the wrong user.** The
+  pipeline service runs as root (`User=root`), so `requests` and `dnspython`
+  must be present in root's system Python. `setup.sh` installed them as
+  whoever invoked the script, and its own import check verified against that
+  same user — so an install run without root would report success while the
+  root service still failed to start on a missing `requests` or `dnspython`.
+
+  `setup.sh` now requires root and exits early with instructions if run
+  without it. Dependencies install into root's system Python, and the import
+  checks run as root, verifying what the service will actually see. The
+  documentation already instructed `sudo ./setup.sh`; the script now enforces
+  it.
+
+---
+
 ## [1.1.4] — 2026-07-20
 
 ### Fixed

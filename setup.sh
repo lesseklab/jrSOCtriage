@@ -33,6 +33,28 @@ INSTALL_DIR="$(pwd)"
 VENV_DIR="$INSTALL_DIR/venv"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+# The pipeline service runs as root (User=root in jrsoctriage.service), so its
+# dependencies must be installed into ROOT's system Python, and the import
+# checks must run as root to prove what the service will actually see. The
+# systemd install steps at the end also need root. Rather than sprinkle sudo
+# through the script and hope the invoking user has cached credentials,
+# require the whole thing to run as root and fail early if it is not.
+#
+# The one wrinkle: a root-owned venv is fine (systemd runs the interface as
+# root too), so nothing here needs to drop privileges.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: run this script as root."
+    echo
+    echo "The pipeline service runs as root, so its Python dependencies must be"
+    echo "installed into root's system Python and verified as root. Re-run with:"
+    echo
+    echo "    sudo bash setup.sh"
+    echo
+    echo "    # or, to select an interpreter:"
+    echo "    sudo PYTHON_BIN=python3.14 bash setup.sh"
+    exit 1
+fi
+
 echo "==============================================="
 echo "  jrSOCtriage interface setup"
 echo "==============================================="
